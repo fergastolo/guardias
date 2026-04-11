@@ -57,10 +57,11 @@ if 'ausencias_globales' not in st.session_state:
     st.session_state.ausencias_globales = cargar_ausencias_db()
 
 
-# --- 3. ESTILOS CSS ---
-st.markdown("""
+# --- 3. ESTILOS CSS BASE ---
+estilos_css = """
 <style>
-    .calendar-table { width: 100%; border-collapse: collapse; font-family: sans-serif; margin-bottom: 30px; }
+    body { font-family: sans-serif; }
+    .calendar-table { width: 100%; border-collapse: collapse; margin-bottom: 30px; }
     .calendar-table th { background-color: #f8f9fa; padding: 10px; border: 1px solid #dee2e6; text-align: center; }
     .calendar-table td { height: 115px; width: 14%; border: 1px solid #dee2e6; vertical-align: top; padding: 5px; }
     .day-number { font-weight: bold; margin-bottom: 5px; color: #555; }
@@ -70,7 +71,8 @@ st.markdown("""
     }
     .mes-titulo { color: #2c3e50; margin-top: 20px; border-bottom: 2px solid #eee; padding-bottom: 10px; }
 </style>
-""", unsafe_allow_html=True)
+"""
+st.markdown(estilos_css, unsafe_allow_html=True)
 
 st.title("🏥 Planificador de Guardias Nefrología")
 
@@ -200,8 +202,6 @@ def resolver():
             # --- REGLA ESTRICTA 2: Si hace Viernes, HACE el Domingo (pero el Viernes puede quedar vacío) ---
             if rango_fechas[d].weekday() == 4: # Viernes
                 if d + 2 < num_dias: # Domingo
-                    # <= significa: Si g[(r, d)] (Viernes) es 1, entonces g[(r, d+2)] (Domingo) DEBE ser 1.
-                    # Pero si Viernes es 0, Domingo puede ser 1 o 0 (otra persona lo cubre).
                     model.Add(g[(r, d)] <= g[(r, d+2)])
     
     objetivos = []
@@ -270,13 +270,22 @@ if st.button("🚀 Generar Planificación Final", type="primary"):
         df_f = resolver()
         
         if df_f is not None:
+            # Preparar el archivo HTML para descarga
+            html_descarga = f"<html><head><meta charset='utf-8'>{estilos_css}</head><body>"
+            html_descarga += "<h1>🏥 Planificación de Guardias - Nefrología</h1>"
+            
             meses_a_pintar = range(mes_ini, mes_fin + 1)
             for m in meses_a_pintar:
-                st.write(render_mes_html(df_f, m), unsafe_allow_html=True)
+                mes_html = render_mes_html(df_f, m)
+                st.write(mes_html, unsafe_allow_html=True)
+                html_descarga += mes_html
+                
+            html_descarga += "</body></html>"
             
             st.divider()
             st.subheader("📊 Resumen de Guardias y Cobertura")
             
+            # Preparar datos para tabla y CSV
             df_valid = df_f[df_f["Residente"] != "VACÍO"].copy()
             df_valid["Fecha"] = pd.to_datetime(df_valid["Fecha"])
             
@@ -296,6 +305,35 @@ if st.button("🚀 Generar Planificación Final", type="primary"):
             tabla.loc["Total Cobertura"] = tabla.sum(axis=0)
             
             st.dataframe(tabla.style.format(precision=0), use_container_width=True)
+            
+            # --- ZONA DE DESCARGAS ---
+            st.divider()
+            st.subheader("📥 Exportar Planificación")
+            col1, col2 = st.columns(2)
+            
+            # Botón 1: HTML visual
+            nombre_archivo_html = f"Guardias_{mes_nombres[mes_ini-1]}_{mes_nombres[mes_fin-1]}_{anio_sel}.html"
+            col1.download_button(
+                label="🎨 Descargar Calendario Visual (Imprimible)",
+                data=html_descarga,
+                file_name=nombre_archivo_html,
+                mime="text/html",
+                type="primary"
+            )
+            
+            # Botón 2: CSV de datos puros
+            nombre_archivo_csv = f"Datos_Guardias_{mes_nombres[mes_ini-1]}_{mes_nombres[mes_fin-1]}_{anio_sel}.csv"
+            # Formatear fecha para el CSV
+            df_csv = df_valid[["Fecha", "Dia", "Residente_R"]].copy()
+            df_csv["Fecha"] = df_csv["Fecha"].dt.strftime('%Y-%m-%d')
+            csv_data = df_csv.to_csv(index=False).encode('utf-8')
+            
+            col2.download_button(
+                label="📊 Descargar Datos en Formato Excel (CSV)",
+                data=csv_data,
+                file_name=nombre_archivo_csv,
+                mime="text/csv"
+            )
             
         else:
             st.error("❌ No hay solución matemática posible. Prueba a flexibilizar ausencias o topes de guardia.")
