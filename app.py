@@ -25,9 +25,7 @@ st.markdown("""
 st.title("🏥 Planificador de Guardias Nefrología")
 
 # --- 1. CONFIGURACIÓN DE PLANTILLA ---
-st.sidebar.header("Configuración de Plantilla")
-st.sidebar.info("Modifica nombres, topes y colores (ej: #FFC1CC)")
-
+st.sidebar.header("1. Configuración de Plantilla")
 df_res_init = pd.DataFrame([
     {"Nombre": "Daniela", "Tope": 6, "R": "R4", "Color": "#FFC1CC"},
     {"Nombre": "Sandra", "Tope": 6, "R": "R3", "Color": "#FFDAB9"},
@@ -40,66 +38,38 @@ df_res_init = pd.DataFrame([
 
 df_residentes = st.sidebar.data_editor(df_res_init, num_rows="dynamic")
 
-# Mapas de datos para el renderizado
+# Mapas de datos
 USER_COLOR_MAP = {row["Nombre"]: row["Color"] for _, row in df_residentes.iterrows()}
 USER_R_MAP = {row["Nombre"]: row["R"] for _, row in df_residentes.iterrows()}
 
 # --- 2. SELECCIÓN DE TIEMPO ---
+st.sidebar.header("2. Periodo")
 mes_nombres = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", 
                "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
-col1, col2 = st.columns(2)
-with col1:
-    mes_sel = st.selectbox("Mes", range(1, 13), index=5, format_func=lambda x: mes_nombres[x-1])
-with col2:
-    anio_sel = st.number_input("Año", value=2026)
+mes_sel = st.sidebar.selectbox("Mes", range(1, 13), index=5, format_func=lambda x: mes_nombres[x-1])
+anio_sel = st.sidebar.number_input("Año", value=2026)
 
 primer_dia = datetime(anio_sel, mes_sel, 1)
 ultimo_dia_mes = calendar.monthrange(anio_sel, mes_sel)[1]
 rango_fechas = pd.date_range(primer_dia, periods=ultimo_dia_mes)
 
-# --- 3. REGISTRO DE AUSENCIAS (CALENDARIO VISUAL) ---
+# --- 3. REGISTRO DE AUSENCIAS (LISTA MES A MES) ---
 st.subheader("📅 Registro de Ausencias")
-st.write("Haz clic en los días que el residente **no** esté disponible (se marcarán como rojos).")
+st.info(f"Selecciona los días 'rojos' para **{mes_nombres[mes_sel-1]} {anio_sel}**")
 
-# Creamos pestañas para cada residente para que no se amontonen
 tabs = st.tabs([row["Nombre"] for _, row in df_residentes.iterrows()])
-
 ausencias = {}
 
 for i, (idx, row) in enumerate(df_residentes.iterrows()):
     nombre = row["Nombre"]
     with tabs[i]:
-        st.write(f"Calendario de ausencias para **{nombre}**")
-        
-        # Obtener la estructura de semanas del mes (0 es día fuera del mes)
-        cal = calendar.Calendar(firstweekday=0)
-        semanas = cal.monthdayscalendar(anio_sel, mes_sel)
-        
-        # Dibujar encabezados de días
-        cols_header = st.columns(7)
-        dias_semana = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"]
-        for j, dia_nom in enumerate(dias_semana):
-            cols_header[j].write(f"**{dia_nom}**")
-        
-        # Lista para guardar los días seleccionados
-        dias_seleccionados = []
-        
-        # Dibujar los checkboxes en cuadrícula
-        for semana in semanas:
-            cols = st.columns(7)
-            for j, dia in enumerate(semana):
-                if dia != 0:
-                    # Crear un checkbox por cada día
-                    # El key es único por residente y día para que Streamlit no se confunda
-                    es_ausente = cols[j].checkbox(str(dia), key=f"check_{nombre}_{dia}")
-                    if es_ausente:
-                        # Si está marcado, lo añadimos a la lista de fechas prohibidas
-                        fecha_ausencia = datetime(anio_sel, mes_sel, dia)
-                        dias_seleccionados.append(fecha_ausencia)
-                else:
-                    cols[j].write("") # Espacio vacío para días fuera del mes
-        
-        ausencias[nombre] = dias_seleccionados
+        # Volvemos al multiselect que es más estable al cambiar de mes
+        ausencias[nombre] = st.multiselect(
+            f"Días no disponible para {nombre}:",
+            rango_fechas,
+            format_func=lambda x: x.strftime('%d - %A'),
+            key=f"aus_list_{nombre}_{mes_sel}" # La clave incluye el mes para resetearse
+        )
 
 # --- 4. FUNCIÓN RENDERIZAR CALENDARIO ---
 def render_calendar_html(df_plan):
@@ -124,53 +94,56 @@ def render_calendar_html(df_plan):
                 anio_res = USER_R_MAP.get(res_nombre, "")
                 
                 label = f"{res_nombre} ({anio_res})" if res_nombre != "VACÍO" else "VACÍO"
-                class_name = "residente-label" if res_nombre != "VACÍO" else "residente-label vacío"
                 style = f'background-color: {color};' if res_nombre != "VACÍO" else ""
 
                 html += f'<td><div class="day-number">{day}</div>'
-                html += f'<div class="{class_name}" style="{style}">{label}</div></td>'
+                html += f'<div class="residente-label" style="{style}">{label}</div></td>'
         html += '</tr>'
     html += '</tbody></table>'
     return html
 
-# --- 5. MOTOR DE RESOLUCIÓN (SOLVER) ---
+# --- 5. MOTOR DE RESOLUCIÓN (CON PRIORIDAD DE VACÍOS EN VIERNES) ---
 def resolver_guardias():
     model = cp_model.CpModel()
     num_res = len(df_residentes)
     num_dias = len(rango_fechas)
     
-    # Aquí estaba el error: la línea ahora está completa
     guardias = {}
     for r in range(num_res):
         for d in range(num_dias):
             guardias[(r, d)] = model.NewBoolVar(f'res{r}_dia{d}')
 
-    # Restricciones
     for d in range(num_dias):
         # Máximo 1 residente por día
         model.Add(sum(guardias[(r, d)] for r in range(num_res)) <= 1)
         
         for r in range(num_res):
             nombre = df_residentes.iloc[r]["Nombre"]
-            # Ausencias
             if rango_fechas[d] in ausencias[nombre]:
                 model.Add(guardias[(r, d)] == 0)
-            # No 2 días seguidos
             if d < num_dias - 1:
                 model.Add(guardias[(r, d)] + guardias[(r, d+1)] <= 1)
-            # Regla Jueves -> Libre Vie, Sab, Dom
-            if rango_fechas[d].weekday() == 3:
+            if rango_fechas[d].weekday() == 3: # Jueves
                 for delta in [1, 2, 3]:
                     if d + delta < num_dias:
                         model.Add(guardias[(r, d+delta)] == 0).OnlyEnforceIf(guardias[(r, d)])
 
-    # Topes Mensuales
     for r in range(num_res):
-        tope = df_residentes.iloc[r]["Tope"]
-        model.Add(sum(guardias[(r, d)] for d in range(num_dias)) <= tope)
+        model.Add(sum(guardias[(r, d)] for d in range(num_dias)) <= df_residentes.iloc[r]["Tope"])
 
-    # Maximizar cobertura
-    model.Maximize(sum(guardias[(r, d)] for r in range(num_res) for d in range(num_dias)))
+    # --- LÓGICA DE PRIORIDAD DE VIERNES VACÍOS ---
+    # Asignamos pesos a la cobertura: 
+    # Cubrir un día normal vale 10 puntos.
+    # Cubrir un viernes vale solo 1 punto.
+    # El sistema preferirá dejar sin cubrir los de 1 punto (Viernes) si faltan manos.
+    objetivo_pesos = []
+    for d in range(num_dias):
+        es_viernes = (rango_fechas[d].weekday() == 4)
+        peso = 1 if es_viernes else 10
+        for r in range(num_res):
+            objetivo_pesos.append(guardias[(r, d)] * peso)
+    
+    model.Maximize(sum(objetivo_pesos))
     
     solver = cp_model.CpSolver()
     status = solver.Solve(model)
@@ -187,16 +160,17 @@ def resolver_guardias():
     return None
 
 # --- 6. EJECUCIÓN ---
+st.divider()
 if st.button("🚀 Generar Planificación Final"):
-    with st.spinner("Calculando cuadrante..."):
+    with st.spinner("Calculando cuadrante optimizado..."):
         df_final = resolver_guardias()
         if df_final is not None:
             st.write(render_calendar_html(df_final), unsafe_allow_html=True)
             
             st.divider()
-            st.subheader("📊 Resumen de Guardias")
+            st.subheader("📊 Resumen de Carga")
             conteo = df_final[df_final["Residente"] != "VACÍO"]["Residente"].value_counts().reset_index()
-            conteo.columns = ["Residente", "Total Guardias"]
+            conteo.columns = ["Residente", "Guardias Realizadas"]
             st.table(conteo)
         else:
-            st.error("No se encontró una solución válida. Prueba a aumentar los topes de guardia.")
+            st.error("No se pudo generar el mes. Revisa si hay demasiadas ausencias.")
