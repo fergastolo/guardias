@@ -6,37 +6,26 @@ from ortools.sat.python import cp_model
 from google.cloud import firestore
 from google.oauth2 import service_account
 import json
-import os
+import base64  # <-- LIBRERÍA MÁGICA
 
 # --- 1. CONFIGURACIÓN DE LA PÁGINA ---
 st.set_page_config(page_title="NefroPlanner Pro", layout="wide")
 
-# --- 2. CONEXIÓN A FIRESTORE (LA VÍA SEGURA CON ARCHIVO TEMPORAL) ---
+# --- 2. CONEXIÓN A FIRESTORE (MÉTODO BASE64 INHACKEABLE) ---
 @st.cache_resource
 def iniciar_firestore():
     try:
-        # 1. Leer los secretos exactamente como están en [connections.firestore]
-        creds_data = dict(st.secrets["connections"]["firestore"])
+        # Cogemos el bloque Base64 de los secretos
+        b64_string = st.secrets["FIREBASE_B64"]
         
-        # 2. Arreglar cualquier salto de línea que Streamlit haya roto al final
-        pk = creds_data["private_key"].replace("\\n", "\n")
-        if "=-----END" in pk and "=\n-----END" not in pk:
-            pk = pk.replace("=-----END", "=\n-----END")
-        creds_data["private_key"] = pk
-
-        # 3. Guardar esto en un archivo físico en el servidor de Streamlit
-        temp_file = "firebase_key_temp.json"
-        with open(temp_file, "w") as f:
-            json.dump(creds_data, f)
-            
-        # 4. Le decimos a Google que lea ese archivo físico
-        creds = service_account.Credentials.from_service_account_file(temp_file)
-        client = firestore.Client(credentials=creds, project=creds_data["project_id"])
+        # Lo descodificamos de vuelta a un diccionario JSON real
+        # Streamlit no puede haber roto esto porque era solo texto plano
+        json_string = base64.b64decode(b64_string).decode('utf-8')
+        creds_dict = json.loads(json_string)
         
-        # 5. Borrar el archivo de credenciales por seguridad
-        if os.path.exists(temp_file):
-            os.remove(temp_file)
-            
+        # Conectamos a Google
+        creds = service_account.Credentials.from_service_account_info(creds_dict)
+        client = firestore.Client(credentials=creds, project=creds_dict["project_id"])
         return client
         
     except Exception as e:
