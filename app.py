@@ -4,15 +4,17 @@ from datetime import datetime, timedelta
 import calendar
 from ortools.sat.python import cp_model
 
+# --- CONFIGURACIÓN DE LA PÁGINA ---
 st.set_page_config(page_title="NefroPlanner 2026", layout="wide")
 
-# --- VERIFICACIÓN DE VERSIÓN PARA EVITAR EL ERROR ---
-HAS_COLUMN_CONFIG = hasattr(st, "column_config")
+# --- BLOQUE DE SEGURIDAD PARA EVITAR EL ERROR ---
+# Verificamos si la versión instalada soporta la configuración de columnas
+soporta_colores = hasattr(st, "column_config")
 
 # --- ESTILOS CSS ---
 st.markdown("""
 <style>
-    .calendar-table { width: 100%; border-collapse: collapse; font-family: sans-serif; margin-bottom: 20px;}
+    .calendar-table { width: 100%; border-collapse: collapse; font-family: sans-serif; }
     .calendar-table th { background-color: #f8f9fa; padding: 10px; border: 1px solid #dee2e6; text-align: center; }
     .calendar-table td { height: 110px; width: 14%; border: 1px solid #dee2e6; vertical-align: top; padding: 5px; }
     .day-number { font-weight: bold; margin-bottom: 5px; color: #555; }
@@ -20,7 +22,6 @@ st.markdown("""
         padding: 6px; border-radius: 4px; font-size: 0.85em; font-weight: bold; 
         text-align: center; margin-top: 10px; color: #1a1a1a; border: 1px solid rgba(0,0,0,0.1);
     }
-    .vacío { color: #999; font-style: italic; background-color: #f9f9f9; border: 1px dashed #ccc; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -39,8 +40,8 @@ df_res_init = pd.DataFrame([
     {"Nombre": "Residente B", "Tope": 2, "R": "R1", "Color": "#B3FFB3"},
 ])
 
-# Solo usamos column_config si la versión de Streamlit lo soporta
-if HAS_COLUMN_CONFIG:
+if soporta_colores:
+    # Si la versión es nueva (>1.23), mostramos el selector de color
     df_residentes = st.sidebar.data_editor(
         df_res_init,
         column_config={
@@ -50,10 +51,11 @@ if HAS_COLUMN_CONFIG:
         num_rows="dynamic"
     )
 else:
-    st.sidebar.warning("Usando modo compatibilidad (versión antigua). Escribe los colores en código Hex (ej: #FF0000)")
+    # Si la versión es vieja, mostramos tabla simple para que no de error
+    st.sidebar.warning("Aviso: El servidor usa una versión antigua. Escribe el color en código (ej: #FF0000)")
     df_residentes = st.sidebar.data_editor(df_res_init, num_rows="dynamic")
 
-# Mapas de datos
+# Mapas de datos basados en la tabla
 USER_COLOR_MAP = {row["Nombre"]: row["Color"] for _, row in df_residentes.iterrows()}
 USER_R_MAP = {row["Nombre"]: row["R"] for _, row in df_residentes.iterrows()}
 
@@ -69,17 +71,17 @@ primer_dia = datetime(anio_sel, mes_sel, 1)
 ultimo_dia = datetime(anio_sel, mes_sel, calendar.monthrange(anio_sel, mes_sel)[1])
 rango_fechas = pd.date_range(primer_dia, ultimo_dia)
 
-# --- 3. AUSENCIAS ---
+# --- 3. REGISTRO DE AUSENCIAS ---
 st.subheader("📅 Registro de Ausencias")
 ausencias = {}
-with st.expander("Marcar días de vacaciones"):
+with st.expander("Haz clic aquí para marcar días rojos"):
     cols = st.columns(3)
     for idx, row in df_residentes.iterrows():
         nombre = row["Nombre"]
         with cols[idx % 3]:
-            ausencias[nombre] = st.multiselect(f"Ausente: {nombre}", rango_fechas, format_func=lambda x: x.strftime('%d'), key=f"aus_{nombre}")
+            ausencias[nombre] = st.multiselect(f"Rojos: {nombre}", rango_fechas, format_func=lambda x: x.strftime('%d'), key=f"aus_{nombre}")
 
-# --- 4. RENDER CALENDARIO ---
+# --- 4. FUNCIÓN RENDERIZAR CALENDARIO ---
 def render_calendar_html(df_plan):
     plan_dict = {row['Fecha']: row['Residente'] for _, row in df_plan.iterrows()}
     cal = calendar.Calendar(firstweekday=0)
@@ -99,9 +101,9 @@ def render_calendar_html(df_plan):
                 fecha_str = f"{anio_sel}-{mes_sel:02d}-{day:02d}"
                 res_nombre = plan_dict.get(fecha_str, "VACÍO")
                 color = USER_COLOR_MAP.get(res_nombre, "#ffffff")
-                anio_res = USER_R_MAP.get(res_nombre, "")
+                r_nivel = USER_R_MAP.get(res_nombre, "")
                 
-                label = f"{res_nombre} ({anio_res})" if res_nombre != "VACÍO" else "VACÍO"
+                label = f"{res_nombre} ({r_nivel})" if res_nombre != "VACÍO" else "VACÍO"
                 style = f'background-color: {color};' if res_nombre != "VACÍO" else ""
 
                 html += f'<td><div class="day-number">{day}</div>'
@@ -119,6 +121,7 @@ def resolver():
     for r in range(num_res):
         for d in range(num_dias):
             guardias[(r, d)] = model.NewBoolVar(f'r{r}_d{d}')
+
     for d in range(num_dias):
         model.Add(sum(guardias[(r, d)] for r in range(num_res)) <= 1)
         for r in range(num_res):
@@ -131,12 +134,14 @@ def resolver():
                 for delta in [1, 2, 3]:
                     if d + delta < num_dias:
                         model.Add(guardias[(r, d+delta)] == 0).OnlyEnforceIf(guardias[(r, d)])
+    
     for r in range(num_res):
         model.Add(sum(guardias[(r, d)] for d in range(num_dias)) <= df_residentes.iloc[r]["Tope"])
-    
+
     model.Maximize(sum(guardias[(r, d)] for r in range(num_res) for d in range(num_dias)))
     solver = cp_model.CpSolver()
     status = solver.Solve(model)
+    
     if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
         res = []
         for d in range(num_dias):
@@ -147,10 +152,10 @@ def resolver():
         return pd.DataFrame(res)
     return None
 
-# --- 6. EJECUCIÓN ---
+# --- 6. BOTÓN ---
 if st.button("🚀 Generar Planificación"):
     df_res = resolver()
     if df_res is not None:
         st.write(render_calendar_html(df_res), unsafe_allow_html=True)
     else:
-        st.error("No se encontró solución viable.")
+        st.error("No se pudo generar el mes. Prueba a subir algún tope de guardias.")
