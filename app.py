@@ -12,11 +12,11 @@ st.markdown("""
 <style>
     .calendar-table { width: 100%; border-collapse: collapse; font-family: sans-serif; }
     .calendar-table th { background-color: #f8f9fa; padding: 10px; border: 1px solid #dee2e6; text-align: center; color: #333; }
-    .calendar-table td { height: 110px; width: 14%; border: 1px solid #dee2e6; vertical-align: top; padding: 5px; }
+    .calendar-table td { height: 115px; width: 14%; border: 1px solid #dee2e6; vertical-align: top; padding: 5px; }
     .day-number { font-weight: bold; margin-bottom: 5px; color: #555; }
     .residente-label { 
-        padding: 6px; border-radius: 4px; font-size: 0.85em; font-weight: bold; 
-        text-align: center; margin-top: 10px; color: #1a1a1a; border: 1px solid rgba(0,0,0,0.1);
+        padding: 6px; border-radius: 4px; font-size: 0.82em; font-weight: bold; 
+        text-align: center; margin-top: 8px; color: #1a1a1a; border: 1px solid rgba(0,0,0,0.1);
     }
     .vacío { color: #999; font-style: italic; background-color: #f9f9f9; border: 1px dashed #ccc; }
 </style>
@@ -24,11 +24,10 @@ st.markdown("""
 
 st.title("🏥 Planificador de Guardias Nefrología")
 
-# --- 1. CONFIGURACIÓN DE PLANTILLA (Versión Simplificada para evitar errores) ---
+# --- 1. CONFIGURACIÓN DE PLANTILLA ---
 st.sidebar.header("Configuración de Plantilla")
-st.sidebar.info("Escribe el color en formato Hex (ej: #FFC1CC).")
+st.sidebar.info("Modifica nombres, topes y colores (ej: #FFC1CC)")
 
-# Tabla inicial
 df_res_init = pd.DataFrame([
     {"Nombre": "Daniela", "Tope": 6, "R": "R4", "Color": "#FFC1CC"},
     {"Nombre": "Sandra", "Tope": 6, "R": "R3", "Color": "#FFDAB9"},
@@ -39,14 +38,13 @@ df_res_init = pd.DataFrame([
     {"Nombre": "Residente B", "Tope": 2, "R": "R1", "Color": "#B3FFB3"},
 ])
 
-# Usamos st.data_editor básico sin column_config para asegurar compatibilidad total
 df_residentes = st.sidebar.data_editor(df_res_init, num_rows="dynamic")
 
-# Mapas de datos
+# Mapas de datos para el renderizado
 USER_COLOR_MAP = {row["Nombre"]: row["Color"] for _, row in df_residentes.iterrows()}
 USER_R_MAP = {row["Nombre"]: row["R"] for _, row in df_residentes.iterrows()}
 
-# --- 2. SELECCIÓN DE MES Y AÑO ---
+# --- 2. SELECCIÓN DE TIEMPO ---
 mes_nombres = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", 
                "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
 col1, col2 = st.columns(2)
@@ -56,8 +54,8 @@ with col2:
     anio_sel = st.number_input("Año", value=2026)
 
 primer_dia = datetime(anio_sel, mes_sel, 1)
-ultimo_dia = datetime(anio_sel, mes_sel, calendar.monthrange(anio_sel, mes_sel)[1])
-rango_fechas = pd.date_range(primer_dia, ultimo_dia)
+ultimo_dia_mes = calendar.monthrange(anio_sel, mes_sel)[1]
+rango_fechas = pd.date_range(primer_dia, periods=ultimo_dia_mes)
 
 # --- 3. REGISTRO DE AUSENCIAS ---
 st.subheader("📅 Registro de Ausencias")
@@ -72,7 +70,7 @@ with st.expander("Marcar días rojos por residente"):
 # --- 4. FUNCIÓN RENDERIZAR CALENDARIO ---
 def render_calendar_html(df_plan):
     plan_dict = {row['Fecha']: row['Residente'] for _, row in df_plan.iterrows()}
-    cal = calendar.Calendar(firstweekday=0) # Lunes
+    cal = calendar.Calendar(firstweekday=0)
     month_days = cal.monthdayscalendar(anio_sel, mes_sel)
     
     html = '<table class="calendar-table"><thead><tr>'
@@ -88,8 +86,6 @@ def render_calendar_html(df_plan):
             else:
                 fecha_str = f"{anio_sel}-{mes_sel:02d}-{day:02d}"
                 res_nombre = plan_dict.get(fecha_str, "VACÍO")
-                
-                # Obtener color y R
                 color = USER_COLOR_MAP.get(res_nombre, "#ffffff")
                 anio_res = USER_R_MAP.get(res_nombre, "")
                 
@@ -103,12 +99,70 @@ def render_calendar_html(df_plan):
     html += '</tbody></table>'
     return html
 
-# --- 5. SOLVER ---
-def resolver():
+# --- 5. MOTOR DE RESOLUCIÓN (SOLVER) ---
+def resolver_guardias():
     model = cp_model.CpModel()
     num_res = len(df_residentes)
     num_dias = len(rango_fechas)
+    
+    # Aquí estaba el error: la línea ahora está completa
     guardias = {}
     for r in range(num_res):
         for d in range(num_dias):
-            guardias[(r, d)] =
+            guardias[(r, d)] = model.NewBoolVar(f'res{r}_dia{d}')
+
+    # Restricciones
+    for d in range(num_dias):
+        # Máximo 1 residente por día
+        model.Add(sum(guardias[(r, d)] for r in range(num_res)) <= 1)
+        
+        for r in range(num_res):
+            nombre = df_residentes.iloc[r]["Nombre"]
+            # Ausencias
+            if rango_fechas[d] in ausencias[nombre]:
+                model.Add(guardias[(r, d)] == 0)
+            # No 2 días seguidos
+            if d < num_dias - 1:
+                model.Add(guardias[(r, d)] + guardias[(r, d+1)] <= 1)
+            # Regla Jueves -> Libre Vie, Sab, Dom
+            if rango_fechas[d].weekday() == 3:
+                for delta in [1, 2, 3]:
+                    if d + delta < num_dias:
+                        model.Add(guardias[(r, d+delta)] == 0).OnlyEnforceIf(guardias[(r, d)])
+
+    # Topes Mensuales
+    for r in range(num_res):
+        tope = df_residentes.iloc[r]["Tope"]
+        model.Add(sum(guardias[(r, d)] for d in range(num_dias)) <= tope)
+
+    # Maximizar cobertura
+    model.Maximize(sum(guardias[(r, d)] for r in range(num_res) for d in range(num_dias)))
+    
+    solver = cp_model.CpSolver()
+    status = solver.Solve(model)
+
+    if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
+        res_data = []
+        for d in range(num_dias):
+            asignado = "VACÍO"
+            for r in range(num_res):
+                if solver.Value(guardias[(r, d)]) == 1:
+                    asignado = df_residentes.iloc[r]["Nombre"]
+            res_data.append({"Fecha": rango_fechas[d].strftime('%Y-%m-%d'), "Residente": asignado})
+        return pd.DataFrame(res_data)
+    return None
+
+# --- 6. EJECUCIÓN ---
+if st.button("🚀 Generar Planificación Final"):
+    with st.spinner("Calculando cuadrante..."):
+        df_final = resolver_guardias()
+        if df_final is not None:
+            st.write(render_calendar_html(df_final), unsafe_allow_html=True)
+            
+            st.divider()
+            st.subheader("📊 Resumen de Guardias")
+            conteo = df_final[df_final["Residente"] != "VACÍO"]["Residente"].value_counts().reset_index()
+            conteo.columns = ["Residente", "Total Guardias"]
+            st.table(conteo)
+        else:
+            st.error("No se encontró una solución válida. Prueba a aumentar los topes de guardia.")
