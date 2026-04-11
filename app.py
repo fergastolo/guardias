@@ -57,15 +57,49 @@ primer_dia = datetime(anio_sel, mes_sel, 1)
 ultimo_dia_mes = calendar.monthrange(anio_sel, mes_sel)[1]
 rango_fechas = pd.date_range(primer_dia, periods=ultimo_dia_mes)
 
-# --- 3. REGISTRO DE AUSENCIAS ---
+# --- 3. REGISTRO DE AUSENCIAS (CALENDARIO VISUAL) ---
 st.subheader("📅 Registro de Ausencias")
+st.write("Haz clic en los días que el residente **no** esté disponible (se marcarán como rojos).")
+
+# Creamos pestañas para cada residente para que no se amontonen
+tabs = st.tabs([row["Nombre"] for _, row in df_residentes.iterrows()])
+
 ausencias = {}
-with st.expander("Marcar días rojos por residente"):
-    cols = st.columns(3)
-    for idx, row in df_residentes.iterrows():
-        nombre = row["Nombre"]
-        with cols[idx % 3]:
-            ausencias[nombre] = st.multiselect(f"Rojos: {nombre}", rango_fechas, format_func=lambda x: x.strftime('%d'), key=f"a_{nombre}")
+
+for i, (idx, row) in enumerate(df_residentes.iterrows()):
+    nombre = row["Nombre"]
+    with tabs[i]:
+        st.write(f"Calendario de ausencias para **{nombre}**")
+        
+        # Obtener la estructura de semanas del mes (0 es día fuera del mes)
+        cal = calendar.Calendar(firstweekday=0)
+        semanas = cal.monthdayscalendar(anio_sel, mes_sel)
+        
+        # Dibujar encabezados de días
+        cols_header = st.columns(7)
+        dias_semana = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"]
+        for j, dia_nom in enumerate(dias_semana):
+            cols_header[j].write(f"**{dia_nom}**")
+        
+        # Lista para guardar los días seleccionados
+        dias_seleccionados = []
+        
+        # Dibujar los checkboxes en cuadrícula
+        for semana in semanas:
+            cols = st.columns(7)
+            for j, dia in enumerate(semana):
+                if dia != 0:
+                    # Crear un checkbox por cada día
+                    # El key es único por residente y día para que Streamlit no se confunda
+                    es_ausente = cols[j].checkbox(str(dia), key=f"check_{nombre}_{dia}")
+                    if es_ausente:
+                        # Si está marcado, lo añadimos a la lista de fechas prohibidas
+                        fecha_ausencia = datetime(anio_sel, mes_sel, dia)
+                        dias_seleccionados.append(fecha_ausencia)
+                else:
+                    cols[j].write("") # Espacio vacío para días fuera del mes
+        
+        ausencias[nombre] = dias_seleccionados
 
 # --- 4. FUNCIÓN RENDERIZAR CALENDARIO ---
 def render_calendar_html(df_plan):
