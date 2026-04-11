@@ -12,11 +12,15 @@ st.set_page_config(page_title="NefroPlanner Pro", layout="wide")
 # --- 2. CONEXIÓN A FIRESTORE (Base de Datos) ---
 # --- 2. CONEXIÓN A FIRESTORE (Base de Datos) ---
 
+# --- 2. CONEXIÓN A FIRESTORE (Base de Datos) ---
+
 @st.cache_resource
 def iniciar_firestore():
     try:
         # Load secrets and clean the private key
         creds_dict = dict(st.secrets["firestore"])
+        
+        # EL TRUCO VITAL: Convertir los "\n" literales a saltos de línea reales
         creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
         
         # Initialize the connection
@@ -25,7 +29,7 @@ def iniciar_firestore():
         return client
     except Exception as e:
         st.error(f"Error crítico al conectar con Firestore: {e}")
-        return None # Return None if initialization fails
+        return None
 
 # Initialize db globally
 db = iniciar_firestore()
