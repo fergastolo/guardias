@@ -56,6 +56,10 @@ def guardar_ausencias_db(nombre, lista_fechas):
 if 'ausencias_globales' not in st.session_state:
     st.session_state.ausencias_globales = cargar_ausencias_db()
 
+# Inicializar la memoria para el cuadrante generado
+if 'plan_generado' not in st.session_state:
+    st.session_state.plan_generado = None
+
 
 # --- 3. ESTILOS CSS BASE ---
 estilos_css = """
@@ -70,6 +74,12 @@ estilos_css = """
         text-align: center; margin-top: 8px; color: #1a1a1a; border: 1px solid rgba(0,0,0,0.1);
     }
     .mes-titulo { color: #2c3e50; margin-top: 20px; border-bottom: 2px solid #eee; padding-bottom: 10px; }
+    
+    /* Nuevo estilo para la tabla de resumen al descargar en HTML */
+    .summary-table { width: 100%; border-collapse: collapse; margin-top: 20px; margin-bottom: 40px; font-size: 0.95em; }
+    .summary-table th { background-color: #e9ecef; padding: 12px; border: 1px solid #dee2e6; text-align: center; font-weight: bold; color: #333;}
+    .summary-table td { padding: 10px; border: 1px solid #dee2e6; text-align: center; color: #111; }
+    .summary-table tbody tr:last-child { font-weight: bold; background-color: #f8f9fa; }
 </style>
 """
 st.markdown(estilos_css, unsafe_allow_html=True)
@@ -265,75 +275,88 @@ def resolver():
 
 # --- 8. EJECUCIÓN Y TABLA DE ESTADÍSTICAS ---
 st.divider()
+
+# Botón para generar y guardar en la memoria de sesión
 if st.button("🚀 Generar Planificación Final", type="primary"):
     with st.spinner(f"Optimizando de forma equitativa desde {mes_nombres[mes_ini-1]} hasta {mes_nombres[mes_fin-1]}..."):
         df_f = resolver()
-        
         if df_f is not None:
-            # Preparar el archivo HTML para descarga
-            html_descarga = f"<html><head><meta charset='utf-8'>{estilos_css}</head><body>"
-            html_descarga += "<h1>🏥 Planificación de Guardias - Nefrología</h1>"
-            
-            meses_a_pintar = range(mes_ini, mes_fin + 1)
-            for m in meses_a_pintar:
-                mes_html = render_mes_html(df_f, m)
-                st.write(mes_html, unsafe_allow_html=True)
-                html_descarga += mes_html
-                
-            html_descarga += "</body></html>"
-            
-            st.divider()
-            st.subheader("📊 Resumen de Guardias y Cobertura")
-            
-            # Preparar datos para tabla y CSV
+            # 1. Preparar datos para tabla resumen y CSV
             df_valid = df_f[df_f["Residente"] != "VACÍO"].copy()
             df_valid["Fecha"] = pd.to_datetime(df_valid["Fecha"])
-            
             dias_semana_str = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
             df_valid["Dia"] = df_valid["Fecha"].dt.weekday.map(lambda x: dias_semana_str[x])
             df_valid["Residente_R"] = df_valid["Residente"].apply(lambda x: f"{x} ({USER_R_MAP.get(x, '')})")
             
             tabla = pd.crosstab(df_valid["Residente_R"], df_valid["Dia"])
-            
             for d in dias_semana_str:
                 if d not in tabla.columns: tabla[d] = 0
-                    
             tabla = tabla[dias_semana_str]
             tabla.index.name = "Residente"
-            
             tabla["Total Guardias"] = tabla.sum(axis=1)
             tabla.loc["Total Cobertura"] = tabla.sum(axis=0)
             
-            st.dataframe(tabla.style.format(precision=0), use_container_width=True)
-            
-            # --- ZONA DE DESCARGAS ---
-            st.divider()
-            st.subheader("📥 Exportar Planificación")
-            col1, col2 = st.columns(2)
-            
-            # Botón 1: HTML visual
-            nombre_archivo_html = f"Guardias_{mes_nombres[mes_ini-1]}_{mes_nombres[mes_fin-1]}_{anio_sel}.html"
-            col1.download_button(
-                label="🎨 Descargar Calendario Visual (Imprimible)",
-                data=html_descarga,
-                file_name=nombre_archivo_html,
-                mime="text/html",
-                type="primary"
-            )
-            
-            # Botón 2: CSV de datos puros
-            nombre_archivo_csv = f"Datos_Guardias_{mes_nombres[mes_ini-1]}_{mes_nombres[mes_fin-1]}_{anio_sel}.csv"
-            # Formatear fecha para el CSV
             df_csv = df_valid[["Fecha", "Dia", "Residente_R"]].copy()
             df_csv["Fecha"] = df_csv["Fecha"].dt.strftime('%Y-%m-%d')
             csv_data = df_csv.to_csv(index=False).encode('utf-8')
             
-            col2.download_button(
-                label="📊 Descargar Datos en Formato Excel (CSV)",
-                data=csv_data,
-                file_name=nombre_archivo_csv,
-                mime="text/csv"
-            )
+            # 2. Preparar el archivo HTML para descarga (incluyendo la tabla)
+            html_descarga = f"<html><head><meta charset='utf-8'>{estilos_css}</head><body>"
+            html_descarga += "<h1>🏥 Planificación de Guardias - Nefrología</h1>"
+            meses_a_pintar = range(mes_ini, mes_fin + 1)
             
+            for m in meses_a_pintar:
+                html_descarga += render_mes_html(df_f, m)
+                
+            # Insertamos la tabla resumen al final del HTML generado
+            html_descarga += "<hr><h2 class='mes-titulo'>📊 Resumen de Guardias y Cobertura</h2>"
+            html_descarga += tabla.to_html(classes="summary-table", border=0, justify="center")
+            html_descarga += "</body></html>"
+            
+            # 3. Guardamos TODOS los datos calculados en la memoria de sesión
+            st.session_state.plan_generado = {
+                "df_f": df_f,
+                "html": html_descarga,
+                "tabla": tabla,
+                "csv": csv_data,
+                "meses_a_pintar": meses_a_pintar
+            }
         else:
+            st.session_state.plan_generado = None
             st.error("❌ No hay solución matemática posible. Prueba a flexibilizar ausencias o topes de guardia.")
+
+
+# Mostrar los resultados si están en la memoria (incluso después de pulsar descargar)
+if st.session_state.plan_generado is not None:
+    datos = st.session_state.plan_generado
+    
+    # 1. Pintar los calendarios en la web
+    for m in datos["meses_a_pintar"]:
+        st.write(render_mes_html(datos["df_f"], m), unsafe_allow_html=True)
+    
+    # 2. Pintar la tabla de resumen en la web
+    st.divider()
+    st.subheader("📊 Resumen de Guardias y Cobertura")
+    st.dataframe(datos["tabla"].style.format(precision=0), use_container_width=True)
+    
+    # 3. Mostrar Botones de Descarga
+    st.divider()
+    st.subheader("📥 Exportar Planificación")
+    col1, col2 = st.columns(2)
+    
+    nombre_archivo_html = f"Guardias_{mes_nombres[mes_ini-1]}_{mes_nombres[mes_fin-1]}_{anio_sel}.html"
+    col1.download_button(
+        label="🎨 Descargar Calendario Visual (Imprimible)",
+        data=datos["html"],
+        file_name=nombre_archivo_html,
+        mime="text/html",
+        type="primary"
+    )
+    
+    nombre_archivo_csv = f"Datos_Guardias_{mes_nombres[mes_ini-1]}_{mes_nombres[mes_fin-1]}_{anio_sel}.csv"
+    col2.download_button(
+        label="📊 Descargar Datos en Formato Excel (CSV)",
+        data=datos["csv"],
+        file_name=nombre_archivo_csv,
+        mime="text/csv"
+    )
