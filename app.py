@@ -7,11 +7,12 @@ from google.cloud import firestore
 from google.oauth2 import service_account
 import json
 import base64
+import random  # <-- NUEVA LIBRERÍA PARA LA ALEATORIEDAD
 
 # --- 1. CONFIGURACIÓN DE LA PÁGINA ---
 st.set_page_config(page_title="NefroPlanner Pro", layout="wide")
 
-# --- 2. CONEXIÓN A FIRESTORE (MÉTODO BASE64 INHACKEABLE) ---
+# --- 2. CONEXIÓN A FIRESTORE ---
 @st.cache_resource
 def iniciar_firestore():
     try:
@@ -168,7 +169,7 @@ def render_mes_html(df_plan, mes_objetivo):
     return html
 
 
-# --- 7. MOTOR DE RESOLUCIÓN MULTI-MES ---
+# --- 7. MOTOR DE RESOLUCIÓN MULTI-MES (MÁS EQUITATIVO Y ALEATORIO) ---
 def resolver():
     model = cp_model.CpModel()
     num_res, num_dias = len(df_residentes), len(rango_fechas)
@@ -191,6 +192,8 @@ def resolver():
                 for dt in [1, 2, 3]:
                     if d + dt < num_dias: model.Add(g[(r, d+dt)] == 0).OnlyEnforceIf(g[(r, d)])
     
+    objetivos = []
+    
     meses_presentes = list(set(rango_fechas.month))
     for mes in meses_presentes:
         indices_del_mes = [d for d in range(num_dias) if rango_fechas[d].month == mes]
@@ -201,20 +204,34 @@ def resolver():
             
             for wd in range(7): 
                 idx_wd_mes = [d for d in indices_del_mes if rango_fechas[d].weekday() == wd]
-                model.Add(sum(g[(r, d)] for d in idx_wd_mes) <= 2)
+                suma_dias = sum(g[(r, d)] for d in idx_wd_mes)
+                
+                # Regla absoluta: Máximo 2
+                model.Add(suma_dias <= 2)
+                
+                # --- SISTEMA DE MULTAS POR FALTA DE EQUIDAD ---
+                # Detectamos si el residente va a hacer 2 días iguales en el mes
+                hace_dos = model.NewBoolVar(f'r{r}_m{mes}_wd{wd}_hace_dos')
+                model.Add(suma_dias <= 1 + hace_dos)
+                
+                # Si 'hace_dos' se activa, le restamos 50.000 puntos a la IA
+                # Esto la obliga a repartir los días entre los demás si es posible
+                objetivos.append(hace_dos * -50000)
 
-    objetivos = []
     for d in range(num_dias):
         wd = rango_fechas[d].weekday()
-        # --- NUEVO SISTEMA DE PESOS ANTI-VACÍOS ---
-        # Garantiza que el sistema siempre preferirá rellenar cualquier día antes que dejarlo vacío.
-        if wd == 4: peso = 1000      # Viernes
-        elif wd == 1: peso = 1010    # Martes
-        elif wd == 2: peso = 1020    # Miércoles
-        else: peso = 1100            # Lunes, Jueves, Sábado, Domingo
+        # Valores base inflados para que la multa reste, pero no impida cubrir el día
+        if wd == 4: peso_base = 100000      # Viernes
+        elif wd == 1: peso_base = 101000    # Martes
+        elif wd == 2: peso_base = 102000    # Miércoles
+        else: peso_base = 110000            # Resto
         
         for r in range(num_res): 
-            objetivos.append(g[(r, d)] * peso)
+            # --- SISTEMA ALEATORIO ---
+            # Sumamos un número aleatorio para romper patrones deterministas.
+            # Cada vez que pulses el botón, dará una solución distinta.
+            peso_final = peso_base + random.randint(1, 999)
+            objetivos.append(g[(r, d)] * peso_final)
     
     model.Maximize(sum(objetivos))
     solver = cp_model.CpSolver()
@@ -232,7 +249,7 @@ def resolver():
 # --- 8. EJECUCIÓN Y TABLA DE ESTADÍSTICAS ---
 st.divider()
 if st.button("🚀 Generar Planificación Final", type="primary"):
-    with st.spinner(f"Optimizando desde {mes_nombres[mes_ini-1]} hasta {mes_nombres[mes_fin-1]}..."):
+    with st.spinner(f"Optimizando de forma equitativa desde {mes_nombres[mes_ini-1]} hasta {mes_nombres[mes_fin-1]}..."):
         df_f = resolver()
         
         if df_f is not None:
