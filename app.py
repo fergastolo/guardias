@@ -7,7 +7,7 @@ from google.cloud import firestore
 from google.oauth2 import service_account
 import json
 import base64
-import random  # <-- NUEVA LIBRERÍA PARA LA ALEATORIEDAD
+import random
 
 # --- 1. CONFIGURACIÓN DE LA PÁGINA ---
 st.set_page_config(page_title="NefroPlanner Pro", layout="wide")
@@ -169,7 +169,7 @@ def render_mes_html(df_plan, mes_objetivo):
     return html
 
 
-# --- 7. MOTOR DE RESOLUCIÓN MULTI-MES (MÁS EQUITATIVO Y ALEATORIO) ---
+# --- 7. MOTOR DE RESOLUCIÓN MULTI-MES ---
 def resolver():
     model = cp_model.CpModel()
     num_res, num_dias = len(df_residentes), len(rango_fechas)
@@ -179,58 +179,74 @@ def resolver():
         for d in range(num_dias): g[(r, d)] = model.NewBoolVar(f'r{r}d{d}')
     
     for d in range(num_dias):
+        # Máximo 1 residente por día
         model.Add(sum(g[(r, d)] for r in range(num_res)) <= 1)
         
         for r in range(num_res):
             nombre = df_residentes.iloc[r]["Nombre"]
+            
+            # Ausencias programadas
             if rango_fechas[d] in st.session_state.ausencias_globales.get(nombre, set()):
                 model.Add(g[(r, d)] == 0)
                 
+            # Regla 48h estricta
             if d < num_dias - 1: model.Add(g[(r, d)] + g[(r, d+1)] <= 1)
             
-            if rango_fechas[d].weekday() == 3:
+            # --- REGLA ESTRICTA 1: Jueves -> Libra Vie/Sab/Dom ---
+            if rango_fechas[d].weekday() == 3: # Jueves
                 for dt in [1, 2, 3]:
                     if d + dt < num_dias: model.Add(g[(r, d+dt)] == 0).OnlyEnforceIf(g[(r, d)])
+                    
+            # --- REGLA ESTRICTA 2: Si hace Viernes, HACE el Domingo obligatoriamente ---
+            if rango_fechas[d].weekday() == 4: # Viernes
+                if d + 2 < num_dias: # Domingo
+                    # Las variables del viernes y el domingo deben ser idénticas para este residente
+                    model.Add(g[(r, d)] == g[(r, d+2)])
     
     objetivos = []
     
     meses_presentes = list(set(rango_fechas.month))
     for mes in meses_presentes:
         indices_del_mes = [d for d in range(num_dias) if rango_fechas[d].month == mes]
+        idx_findes = [d for d in indices_del_mes if rango_fechas[d].weekday() in [5, 6]] # Sábados y Domingos
         
         for r in range(num_res):
             tope_mensual = df_residentes.iloc[r]["Tope"]
+            
+            # Control del Tope general
             model.Add(sum(g[(r, d)] for d in indices_del_mes) <= tope_mensual)
             
+            # --- REGLA EQUIDAD FINES DE SEMANA (Proporcional al Tope) ---
+            if tope_mensual >= 6:
+                max_findes = 2
+            elif tope_mensual >= 4:
+                max_findes = 2
+            else:
+                max_findes = 1
+            model.Add(sum(g[(r, d)] for d in idx_findes) <= max_findes)
+            
+            # Control para no repetir el mismo día > 2 veces
             for wd in range(7): 
                 idx_wd_mes = [d for d in indices_del_mes if rango_fechas[d].weekday() == wd]
                 suma_dias = sum(g[(r, d)] for d in idx_wd_mes)
                 
-                # Regla absoluta: Máximo 2
-                model.Add(suma_dias <= 2)
+                model.Add(suma_dias <= 2) # Hard limit
                 
-                # --- SISTEMA DE MULTAS POR FALTA DE EQUIDAD ---
-                # Detectamos si el residente va a hacer 2 días iguales en el mes
+                # Multa por equidad (para intentar que todos hagan 1 antes que alguien haga 2)
                 hace_dos = model.NewBoolVar(f'r{r}_m{mes}_wd{wd}_hace_dos')
                 model.Add(suma_dias <= 1 + hace_dos)
-                
-                # Si 'hace_dos' se activa, le restamos 50.000 puntos a la IA
-                # Esto la obliga a repartir los días entre los demás si es posible
                 objetivos.append(hace_dos * -50000)
 
     for d in range(num_dias):
         wd = rango_fechas[d].weekday()
-        # Valores base inflados para que la multa reste, pero no impida cubrir el día
+        # Pesos anti-vacíos base
         if wd == 4: peso_base = 100000      # Viernes
         elif wd == 1: peso_base = 101000    # Martes
         elif wd == 2: peso_base = 102000    # Miércoles
         else: peso_base = 110000            # Resto
         
         for r in range(num_res): 
-            # --- SISTEMA ALEATORIO ---
-            # Sumamos un número aleatorio para romper patrones deterministas.
-            # Cada vez que pulses el botón, dará una solución distinta.
-            peso_final = peso_base + random.randint(1, 999)
+            peso_final = peso_base + random.randint(1, 999) # Factor Aleatorio
             objetivos.append(g[(r, d)] * peso_final)
     
     model.Maximize(sum(objetivos))
@@ -281,4 +297,4 @@ if st.button("🚀 Generar Planificación Final", type="primary"):
             st.dataframe(tabla.style.format(precision=0), use_container_width=True)
             
         else:
-            st.error("❌ No hay solución matemática posible. Prueba a subir algún tope de guardia, quitar alguna ausencia o permitir más vacíos.")
+            st.error("❌ No hay solución matemática posible. Prueba a flexibilizar ausencias o topes de guardia.")
