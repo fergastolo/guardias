@@ -288,19 +288,27 @@ if st.button("🚀 Generar Planificación Final", type="primary"):
             df_valid["Dia"] = df_valid["Fecha"].dt.weekday.map(lambda x: dias_semana_str[x])
             df_valid["Residente_R"] = df_valid["Residente"].apply(lambda x: f"{x} ({USER_R_MAP.get(x, '')})")
             
+            # Crear la tabla pivote cruzada
             tabla = pd.crosstab(df_valid["Residente_R"], df_valid["Dia"])
             for d in dias_semana_str:
                 if d not in tabla.columns: tabla[d] = 0
             tabla = tabla[dias_semana_str]
             tabla.index.name = "Residente"
+            
+            # ORDENAR LA TABLA SEGÚN LA PLANTILLA LATERAL
+            orden_plantilla = [f"{row['Nombre']} ({row['R']})" for _, row in df_residentes.iterrows()]
+            tabla = tabla.reindex(orden_plantilla, fill_value=0)
+            
+            # Calcular totales después de ordenar
             tabla["Total Guardias"] = tabla.sum(axis=1)
             tabla.loc["Total Cobertura"] = tabla.sum(axis=0)
             
+            # Generar el CSV de los datos puros
             df_csv = df_valid[["Fecha", "Dia", "Residente_R"]].copy()
             df_csv["Fecha"] = df_csv["Fecha"].dt.strftime('%Y-%m-%d')
             csv_data = df_csv.to_csv(index=False).encode('utf-8')
             
-            # 2. Preparar el archivo HTML para descarga (incluyendo la tabla)
+            # 2. Preparar el archivo HTML para descarga (incluyendo calendarios y tabla)
             html_descarga = f"<html><head><meta charset='utf-8'>{estilos_css}</head><body>"
             html_descarga += "<h1>🏥 Planificación de Guardias - Nefrología</h1>"
             meses_a_pintar = range(mes_ini, mes_fin + 1)
