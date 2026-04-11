@@ -197,11 +197,12 @@ def resolver():
                 for dt in [1, 2, 3]:
                     if d + dt < num_dias: model.Add(g[(r, d+dt)] == 0).OnlyEnforceIf(g[(r, d)])
                     
-            # --- REGLA ESTRICTA 2: Si hace Viernes, HACE el Domingo obligatoriamente ---
+            # --- REGLA ESTRICTA 2: Si hace Viernes, HACE el Domingo (pero el Viernes puede quedar vacío) ---
             if rango_fechas[d].weekday() == 4: # Viernes
                 if d + 2 < num_dias: # Domingo
-                    # Las variables del viernes y el domingo deben ser idénticas para este residente
-                    model.Add(g[(r, d)] == g[(r, d+2)])
+                    # <= significa: Si g[(r, d)] (Viernes) es 1, entonces g[(r, d+2)] (Domingo) DEBE ser 1.
+                    # Pero si Viernes es 0, Domingo puede ser 1 o 0 (otra persona lo cubre).
+                    model.Add(g[(r, d)] <= g[(r, d+2)])
     
     objetivos = []
     
@@ -216,7 +217,7 @@ def resolver():
             # Control del Tope general
             model.Add(sum(g[(r, d)] for d in indices_del_mes) <= tope_mensual)
             
-            # --- REGLA EQUIDAD FINES DE SEMANA (Proporcional al Tope) ---
+            # --- REGLA EQUIDAD FINES DE SEMANA ---
             if tope_mensual >= 6:
                 max_findes = 2
             elif tope_mensual >= 4:
@@ -232,7 +233,7 @@ def resolver():
                 
                 model.Add(suma_dias <= 2) # Hard limit
                 
-                # Multa por equidad (para intentar que todos hagan 1 antes que alguien haga 2)
+                # Multa por equidad
                 hace_dos = model.NewBoolVar(f'r{r}_m{mes}_wd{wd}_hace_dos')
                 model.Add(suma_dias <= 1 + hace_dos)
                 objetivos.append(hace_dos * -50000)
@@ -240,13 +241,13 @@ def resolver():
     for d in range(num_dias):
         wd = rango_fechas[d].weekday()
         # Pesos anti-vacíos base
-        if wd == 4: peso_base = 100000      # Viernes
+        if wd == 4: peso_base = 100000      # Viernes (Pierde menos si se queda vacío)
         elif wd == 1: peso_base = 101000    # Martes
         elif wd == 2: peso_base = 102000    # Miércoles
         else: peso_base = 110000            # Resto
         
         for r in range(num_res): 
-            peso_final = peso_base + random.randint(1, 999) # Factor Aleatorio
+            peso_final = peso_base + random.randint(1, 999) 
             objetivos.append(g[(r, d)] * peso_final)
     
     model.Maximize(sum(objetivos))
