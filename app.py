@@ -14,10 +14,29 @@ st.set_page_config(page_title="NefroPlanner Pro", layout="wide")
 @st.cache_resource
 def iniciar_firestore():
     try:
-        # Extraemos el texto crudo de los secretos y lo convertimos a diccionario
-        # Esto evita CUALQUIER error de formato de Streamlit
-        creds_dict = json.loads(st.secrets["firebase_json"])
+        # Detectamos si usaste el formato [firestore] o firebase_json = '''...'''
+        if "firestore" in st.secrets:
+            creds_dict = dict(st.secrets["firestore"])
+        elif "firebase_json" in st.secrets:
+            creds_dict = json.loads(st.secrets["firebase_json"])
+        else:
+            st.error("No se encontraron los secretos de Firebase en Streamlit.")
+            return None
+
+        # --- LIMPIEZA AGRESIVA DE LA CLAVE PRIVADA ---
+        # Esto soluciona el error InvalidByte(1624, 61) del símbolo '='
+        pk = creds_dict["private_key"]
+        pk = pk.replace("\\n", "\n")  # Convertir \n de texto a salto de línea real
+        pk = pk.replace("\r", "")     # Eliminar retornos de carro de Windows
+        pk = pk.strip()               # Quitar espacios vacíos al principio y final
         
+        # Asegurarnos de que el bloque termine exactamente con un salto de línea antes del END
+        if "=\n-----END" not in pk and "=-----END" in pk:
+            pk = pk.replace("=-----END", "=\n-----END")
+            
+        creds_dict["private_key"] = pk
+        # ----------------------------------------------
+
         creds = service_account.Credentials.from_service_account_info(creds_dict)
         client = firestore.Client(credentials=creds, project=creds_dict["project_id"])
         return client
@@ -115,13 +134,10 @@ for i, (idx, row) in enumerate(df_residentes.iterrows()):
         if nombre not in st.session_state.ausencias_globales:
             st.session_state.ausencias_globales[nombre] = set()
         
-        # Filtrar solo las del mes actual para el multiselect
         actuales = [d for d in st.session_state.ausencias_globales[nombre] if d.month == mes_sel and d.year == anio_sel]
         
         seleccion = st.multiselect(f"Selecciona días rojos para {nombre}:", rango_fechas, default=actuales, format_func=lambda x: x.strftime('%d'), key=f"m_{nombre}_{mes_sel}")
         
-        # Actualizar memoria interna
-        # Limpiar mes actual y añadir los nuevos
         st.session_state.ausencias_globales[nombre] = {d for d in st.session_state.ausencias_globales[nombre] if not (d.month == mes_sel and d.year == anio_sel)}
         for d in seleccion:
             st.session_state.ausencias_globales[nombre].add(d)
@@ -163,43 +179,30 @@ def resolver():
     num_res, num_dias = len(df_residentes), len(rango_fechas)
     g = {}
     
-    # Crear variables booleanas
     for r in range(num_res):
         for d in range(num_dias): g[(r, d)] = model.NewBoolVar(f'r{r}d{d}')
     
     for d in range(num_dias):
-        # Un residente por día máximo
         model.Add(sum(g[(r, d)] for r in range(num_res)) <= 1)
         
         for r in range(num_res):
             nombre = df_residentes.iloc[r]["Nombre"]
-            
-            # Ausencias programadas
             if rango_fechas[d] in st.session_state.ausencias_globales.get(nombre, set()):
                 model.Add(g[(r, d)] == 0)
-                
-            # No dos días seguidos
             if d < num_dias - 1: model.Add(g[(r, d)] + g[(r, d+1)] <= 1)
-            
-            # Regla Jueves (Si hace jueves, libra viernes, sabado y domingo)
             if rango_fechas[d].weekday() == 3: # Jueves
                 for dt in [1, 2, 3]:
                     if d + dt < num_dias: model.Add(g[(r, d+dt)] == 0).OnlyEnforceIf(g[(r, d)])
     
     for r in range(num_res):
-        # Topes de guardias
         model.Add(sum(g[(r, d)] for d in range(num_dias)) <= df_residentes.iloc[r]["Tope"])
-        
-        # Equidad: Máximo 2 veces el mismo día de la semana
         for wd in range(7): 
             idx_wd = [d for d in range(num_dias) if rango_fechas[d].weekday() == wd]
             model.Add(sum(g[(r, d)] for d in idx_wd) <= 2)
 
-    # Prioridad de vacíos
     objetivos = []
     for d in range(num_dias):
         wd = rango_fechas[d].weekday()
-        # Viernes=1, Martes=10, Miércoles=20, Resto=100
         peso = 1 if wd == 4 else (10 if wd == 1 else (20 if wd == 2 else 100))
         for r in range(num_res): objetivos.append(g[(r, d)] * peso)
     
@@ -225,7 +228,6 @@ if st.button("🚀 Generar Planificación Final"):
         if df_f is not None:
             st.write(render_calendar_html(df_f), unsafe_allow_html=True)
             
-            # Tabla de resumen
             st.divider()
             st.subheader("📊 Control de Equidad")
             conteo = df_f[df_f["Residente"] != "VACÍO"]["Residente"].value_counts().reset_index()
