@@ -119,7 +119,6 @@ for i, (idx, row) in enumerate(df_residentes.iterrows()):
         if nombre not in st.session_state.ausencias_globales:
             st.session_state.ausencias_globales[nombre] = set()
         
-        # Mostrar ausencias de TODO el periodo seleccionado
         actuales = [d for d in st.session_state.ausencias_globales[nombre] if primer_dia <= d <= ultimo_dia]
         
         seleccion = st.multiselect(
@@ -130,7 +129,6 @@ for i, (idx, row) in enumerate(df_residentes.iterrows()):
             key=f"m_{nombre}_{mes_ini}_{mes_fin}"
         )
         
-        # Limpiar el periodo actual en memoria y sobreescribir
         st.session_state.ausencias_globales[nombre] = {d for d in st.session_state.ausencias_globales[nombre] if not (primer_dia <= d <= ultimo_dia)}
         for d in seleccion:
             st.session_state.ausencias_globales[nombre].add(d)
@@ -187,25 +185,20 @@ def resolver():
             if rango_fechas[d] in st.session_state.ausencias_globales.get(nombre, set()):
                 model.Add(g[(r, d)] == 0)
                 
-            # Regla 48h (aplica incluso entre el 30 de Junio y el 1 de Julio)
             if d < num_dias - 1: model.Add(g[(r, d)] + g[(r, d+1)] <= 1)
             
-            # Regla Jueves
             if rango_fechas[d].weekday() == 3:
                 for dt in [1, 2, 3]:
                     if d + dt < num_dias: model.Add(g[(r, d+dt)] == 0).OnlyEnforceIf(g[(r, d)])
     
-    # Reglas calculadas POR MES
     meses_presentes = list(set(rango_fechas.month))
     for mes in meses_presentes:
         indices_del_mes = [d for d in range(num_dias) if rango_fechas[d].month == mes]
         
         for r in range(num_res):
-            # 1. Tope mensual estricto
             tope_mensual = df_residentes.iloc[r]["Tope"]
             model.Add(sum(g[(r, d)] for d in indices_del_mes) <= tope_mensual)
             
-            # 2. Equidad: Máx 2 veces el mismo día de la semana POR MES
             for wd in range(7): 
                 idx_wd_mes = [d for d in indices_del_mes if rango_fechas[d].weekday() == wd]
                 model.Add(sum(g[(r, d)] for d in idx_wd_mes) <= 2)
@@ -213,8 +206,15 @@ def resolver():
     objetivos = []
     for d in range(num_dias):
         wd = rango_fechas[d].weekday()
-        peso = 1 if wd == 4 else (10 if wd == 1 else (20 if wd == 2 else 100))
-        for r in range(num_res): objetivos.append(g[(r, d)] * peso)
+        # --- NUEVO SISTEMA DE PESOS ANTI-VACÍOS ---
+        # Garantiza que el sistema siempre preferirá rellenar cualquier día antes que dejarlo vacío.
+        if wd == 4: peso = 1000      # Viernes
+        elif wd == 1: peso = 1010    # Martes
+        elif wd == 2: peso = 1020    # Miércoles
+        else: peso = 1100            # Lunes, Jueves, Sábado, Domingo
+        
+        for r in range(num_res): 
+            objetivos.append(g[(r, d)] * peso)
     
     model.Maximize(sum(objetivos))
     solver = cp_model.CpSolver()
@@ -236,7 +236,6 @@ if st.button("🚀 Generar Planificación Final", type="primary"):
         df_f = resolver()
         
         if df_f is not None:
-            # 1. Pintar los calendarios uno debajo de otro
             meses_a_pintar = range(mes_ini, mes_fin + 1)
             for m in meses_a_pintar:
                 st.write(render_mes_html(df_f, m), unsafe_allow_html=True)
@@ -244,34 +243,24 @@ if st.button("🚀 Generar Planificación Final", type="primary"):
             st.divider()
             st.subheader("📊 Resumen de Guardias y Cobertura")
             
-            # 2. Construir la Tabla Estilo Excel
             df_valid = df_f[df_f["Residente"] != "VACÍO"].copy()
             df_valid["Fecha"] = pd.to_datetime(df_valid["Fecha"])
             
             dias_semana_str = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
             df_valid["Dia"] = df_valid["Fecha"].dt.weekday.map(lambda x: dias_semana_str[x])
-            
-            # Añadir etiqueta (R) al nombre para la tabla
             df_valid["Residente_R"] = df_valid["Residente"].apply(lambda x: f"{x} ({USER_R_MAP.get(x, '')})")
             
-            # Tabla dinámica (Crosstab)
             tabla = pd.crosstab(df_valid["Residente_R"], df_valid["Dia"])
             
-            # Asegurar que existan todas las columnas (por si nadie hizo un viernes, por ejemplo)
             for d in dias_semana_str:
                 if d not in tabla.columns: tabla[d] = 0
                     
-            # Ordenar columnas e índices
             tabla = tabla[dias_semana_str]
             tabla.index.name = "Residente"
             
-            # Calcular Totales por Residente
             tabla["Total Guardias"] = tabla.sum(axis=1)
-            
-            # Calcular Total Cobertura (Fila inferior)
             tabla.loc["Total Cobertura"] = tabla.sum(axis=0)
             
-            # Mostrar la tabla formateada en Streamlit
             st.dataframe(tabla.style.format(precision=0), use_container_width=True)
             
         else:
