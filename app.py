@@ -5,33 +5,40 @@ import calendar
 from ortools.sat.python import cp_model
 from google.cloud import firestore
 from google.oauth2 import service_account
+import textwrap  # <-- Librería clave para arreglar el error de Firebase
 
 # --- 1. CONFIGURACIÓN DE LA PÁGINA ---
 st.set_page_config(page_title="NefroPlanner Pro", layout="wide")
 
-# --- 2. CONEXIÓN A FIRESTORE (A PRUEBA DE FALLOS) ---
+# --- 2. CONEXIÓN A FIRESTORE (LA OPCIÓN NUCLEAR ANTIFALLOS) ---
 @st.cache_resource
 def iniciar_firestore():
     try:
-        # Cogemos las variables individuales de Streamlit Secrets
         project_id = st.secrets["FIREBASE_PROJECT_ID"]
         client_email = st.secrets["FIREBASE_CLIENT_EMAIL"]
-        private_key = st.secrets["FIREBASE_PRIVATE_KEY"]
+        raw_key = st.secrets["FIREBASE_PRIVATE_KEY"]
         
-        # Limpieza forzosa de los saltos de línea para evitar el InvalidByte
-        private_key = private_key.replace("\\n", "\n")
-
-        # Construimos el diccionario nosotros mismos en Python
-        # Así evitamos que el TOML de Streamlit rompa el JSON
+        # --- RECONSTRUCCIÓN MATEMÁTICA DE LA CLAVE ---
+        # 1. Quitamos los encabezados, finales y cualquier \n o espacio que Streamlit haya roto
+        raw_key = raw_key.replace("-----BEGIN PRIVATE KEY-----", "")
+        raw_key = raw_key.replace("-----END PRIVATE KEY-----", "")
+        raw_key = raw_key.replace("\\n", "")
+        raw_key = "".join(raw_key.split()) # Borra absolutamente todos los espacios ocultos
+        
+        # 2. Reconstruimos la clave EXACTAMENTE como la exige Google (64 caracteres por línea)
+        formatted_key = "-----BEGIN PRIVATE KEY-----\n"
+        formatted_key += "\n".join(textwrap.wrap(raw_key, 64))
+        formatted_key += "\n-----END PRIVATE KEY-----\n"
+        
+        # Creamos el diccionario perfecto
         creds_dict = {
             "type": "service_account",
             "project_id": project_id,
-            "private_key": private_key,
+            "private_key": formatted_key,
             "client_email": client_email,
             "token_uri": "https://oauth2.googleapis.com/token"
         }
         
-        # Conectamos
         creds = service_account.Credentials.from_service_account_info(creds_dict)
         client = firestore.Client(credentials=creds, project=project_id)
         return client
@@ -45,7 +52,7 @@ db = iniciar_firestore()
 def cargar_ausencias_db():
     ausencias_dict = {}
     if db is None:
-        st.warning("No hay conexión a la base de datos. Usando memoria temporal.")
+        st.warning("⚠️ No hay conexión a la base de datos. Usando memoria temporal del navegador.")
         return ausencias_dict
         
     try:
@@ -60,14 +67,14 @@ def cargar_ausencias_db():
 
 def guardar_ausencias_db(nombre, lista_fechas):
     if db is None:
-        st.error("No se puede guardar: No hay conexión a Firestore.")
-        return
-        
+        return False
     try:
         fechas_str = [f.strftime('%Y-%m-%d') for f in lista_fechas]
         db.collection("ausencias").document(nombre).set({"fechas": fechas_str})
+        return True
     except Exception as e:
         st.error(f"Error al guardar datos para {nombre}: {e}")
+        return False
 
 # Inicializamos la memoria de la app con los datos de la DB
 if 'ausencias_globales' not in st.session_state:
@@ -129,21 +136,25 @@ for i, (idx, row) in enumerate(df_residentes.iterrows()):
         if nombre not in st.session_state.ausencias_globales:
             st.session_state.ausencias_globales[nombre] = set()
         
-        # Filtrar solo las del mes actual para el multiselect
         actuales = [d for d in st.session_state.ausencias_globales[nombre] if d.month == mes_sel and d.year == anio_sel]
         
         seleccion = st.multiselect(f"Selecciona días rojos para {nombre}:", rango_fechas, default=actuales, format_func=lambda x: x.strftime('%d'), key=f"m_{nombre}_{mes_sel}")
         
-        # Actualizar memoria interna
         st.session_state.ausencias_globales[nombre] = {d for d in st.session_state.ausencias_globales[nombre] if not (d.month == mes_sel and d.year == anio_sel)}
         for d in seleccion:
             st.session_state.ausencias_globales[nombre].add(d)
 
 if st.button("☁️ Sincronizar / Guardar en la Nube"):
-    with st.spinner("Guardando en Firestore..."):
-        for nombre, fechas in st.session_state.ausencias_globales.items():
-            guardar_ausencias_db(nombre, fechas)
-        st.success("¡Datos guardados permanentemente!")
+    if db is None:
+        st.error("❌ No se puede guardar: No hay conexión a Firestore. Revisa los Secrets.")
+    else:
+        with st.spinner("Guardando en Firestore..."):
+            exito = True
+            for nombre, fechas in st.session_state.ausencias_globales.items():
+                if not guardar_ausencias_db(nombre, fechas):
+                    exito = False
+            if exito:
+                st.success("✅ ¡Datos guardados permanentemente!")
 
 
 # --- 6. RENDERIZADO DEL CALENDARIO ---
@@ -176,43 +187,30 @@ def resolver():
     num_res, num_dias = len(df_residentes), len(rango_fechas)
     g = {}
     
-    # Crear variables booleanas
     for r in range(num_res):
         for d in range(num_dias): g[(r, d)] = model.NewBoolVar(f'r{r}d{d}')
     
     for d in range(num_dias):
-        # Un residente por día máximo
         model.Add(sum(g[(r, d)] for r in range(num_res)) <= 1)
         
         for r in range(num_res):
             nombre = df_residentes.iloc[r]["Nombre"]
-            
-            # Ausencias programadas
             if rango_fechas[d] in st.session_state.ausencias_globales.get(nombre, set()):
                 model.Add(g[(r, d)] == 0)
-                
-            # No dos días seguidos
             if d < num_dias - 1: model.Add(g[(r, d)] + g[(r, d+1)] <= 1)
-            
-            # Regla Jueves (Si hace jueves, libra viernes, sabado y domingo)
             if rango_fechas[d].weekday() == 3: # Jueves
                 for dt in [1, 2, 3]:
                     if d + dt < num_dias: model.Add(g[(r, d+dt)] == 0).OnlyEnforceIf(g[(r, d)])
     
     for r in range(num_res):
-        # Topes de guardias
         model.Add(sum(g[(r, d)] for d in range(num_dias)) <= df_residentes.iloc[r]["Tope"])
-        
-        # Equidad: Máximo 2 veces el mismo día de la semana
         for wd in range(7): 
             idx_wd = [d for d in range(num_dias) if rango_fechas[d].weekday() == wd]
             model.Add(sum(g[(r, d)] for d in idx_wd) <= 2)
 
-    # Prioridad de vacíos
     objetivos = []
     for d in range(num_dias):
         wd = rango_fechas[d].weekday()
-        # Viernes=1, Martes=10, Miércoles=20, Resto=100
         peso = 1 if wd == 4 else (10 if wd == 1 else (20 if wd == 2 else 100))
         for r in range(num_res): objetivos.append(g[(r, d)] * peso)
     
@@ -238,7 +236,6 @@ if st.button("🚀 Generar Planificación Final"):
         if df_f is not None:
             st.write(render_calendar_html(df_f), unsafe_allow_html=True)
             
-            # Tabla de resumen
             st.divider()
             st.subheader("📊 Control de Equidad")
             conteo = df_f[df_f["Residente"] != "VACÍO"]["Residente"].value_counts().reset_index()
