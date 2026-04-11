@@ -5,25 +5,19 @@ import calendar
 from ortools.sat.python import cp_model
 from google.cloud import firestore
 from google.oauth2 import service_account
+import json
 
 # --- 1. CONFIGURACIÓN DE LA PÁGINA ---
 st.set_page_config(page_title="NefroPlanner Pro", layout="wide")
 
-# --- 2. CONEXIÓN A FIRESTORE (Base de Datos) ---
-# --- 2. CONEXIÓN A FIRESTORE (Base de Datos) ---
-
-# --- 2. CONEXIÓN A FIRESTORE (Base de Datos) ---
-
+# --- 2. CONEXIÓN A FIRESTORE (Base de Datos Segura) ---
 @st.cache_resource
 def iniciar_firestore():
     try:
-        # Load secrets and clean the private key
-        creds_dict = dict(st.secrets["firestore"])
+        # Extraemos el texto crudo de los secretos y lo convertimos a diccionario
+        # Esto evita CUALQUIER error de formato de Streamlit
+        creds_dict = json.loads(st.secrets["firebase_json"])
         
-        # EL TRUCO VITAL: Convertir los "\n" literales a saltos de línea reales
-        creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
-        
-        # Initialize the connection
         creds = service_account.Credentials.from_service_account_info(creds_dict)
         client = firestore.Client(credentials=creds, project=creds_dict["project_id"])
         return client
@@ -31,13 +25,11 @@ def iniciar_firestore():
         st.error(f"Error crítico al conectar con Firestore: {e}")
         return None
 
-# Initialize db globally
+# Inicializamos db de forma global
 db = iniciar_firestore()
 
 def cargar_ausencias_db():
     ausencias_dict = {}
-    
-    # Check if db was successfully initialized before querying
     if db is None:
         st.warning("No hay conexión a la base de datos. Usando memoria temporal.")
         return ausencias_dict
@@ -50,7 +42,6 @@ def cargar_ausencias_db():
             ausencias_dict[doc.id] = fechas_obj
     except Exception as e:
         st.error(f"Error al leer la colección 'ausencias': {e}")
-        
     return ausencias_dict
 
 def guardar_ausencias_db(nombre, lista_fechas):
@@ -64,9 +55,10 @@ def guardar_ausencias_db(nombre, lista_fechas):
     except Exception as e:
         st.error(f"Error al guardar datos para {nombre}: {e}")
 
-# Initialize session state using the safe function
+# Inicializamos la memoria de la app con los datos de la DB
 if 'ausencias_globales' not in st.session_state:
     st.session_state.ausencias_globales = cargar_ausencias_db()
+
 
 # --- 3. ESTILOS CSS ---
 st.markdown("""
@@ -83,6 +75,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.title("🏥 Planificador de Guardias Nefrología")
+
 
 # --- 4. CONFIGURACIÓN DE PLANTILLA (Sidebar) ---
 st.sidebar.header("1. Plantilla de Residentes")
@@ -108,6 +101,7 @@ anio_sel = st.sidebar.number_input("Año", value=2026)
 primer_dia = datetime(anio_sel, mes_sel, 1)
 ultimo_dia_mes = calendar.monthrange(anio_sel, mes_sel)[1]
 rango_fechas = pd.date_range(primer_dia, periods=ultimo_dia_mes)
+
 
 # --- 5. GESTIÓN DE AUSENCIAS ---
 st.subheader("📅 Registro de Ausencias (Rojos)")
@@ -138,7 +132,8 @@ if st.button("☁️ Sincronizar / Guardar en la Nube"):
             guardar_ausencias_db(nombre, fechas)
         st.success("¡Datos guardados permanentemente!")
 
-# --- 6. RENDERIZADO Y SOLVER ---
+
+# --- 6. RENDERIZADO DEL CALENDARIO ---
 def render_calendar_html(df_plan):
     plan_dict = {row['Fecha']: row['Residente'] for _, row in df_plan.iterrows()}
     cal = calendar.Calendar(firstweekday=0)
@@ -161,37 +156,55 @@ def render_calendar_html(df_plan):
     html += '</tbody></table>'
     return html
 
+
+# --- 7. MOTOR DE RESOLUCIÓN DE GUARDIAS ---
 def resolver():
     model = cp_model.CpModel()
     num_res, num_dias = len(df_residentes), len(rango_fechas)
     g = {}
+    
+    # Crear variables booleanas
     for r in range(num_res):
         for d in range(num_dias): g[(r, d)] = model.NewBoolVar(f'r{r}d{d}')
     
     for d in range(num_dias):
+        # Un residente por día máximo
         model.Add(sum(g[(r, d)] for r in range(num_res)) <= 1)
+        
         for r in range(num_res):
             nombre = df_residentes.iloc[r]["Nombre"]
+            
+            # Ausencias programadas
             if rango_fechas[d] in st.session_state.ausencias_globales.get(nombre, set()):
                 model.Add(g[(r, d)] == 0)
+                
+            # No dos días seguidos
             if d < num_dias - 1: model.Add(g[(r, d)] + g[(r, d+1)] <= 1)
+            
+            # Regla Jueves (Si hace jueves, libra viernes, sabado y domingo)
             if rango_fechas[d].weekday() == 3: # Jueves
                 for dt in [1, 2, 3]:
                     if d + dt < num_dias: model.Add(g[(r, d+dt)] == 0).OnlyEnforceIf(g[(r, d)])
     
     for r in range(num_res):
+        # Topes de guardias
         model.Add(sum(g[(r, d)] for d in range(num_dias)) <= df_residentes.iloc[r]["Tope"])
-        for wd in range(7): # Máx 2 mismos días semana
+        
+        # Equidad: Máximo 2 veces el mismo día de la semana
+        for wd in range(7): 
             idx_wd = [d for d in range(num_dias) if rango_fechas[d].weekday() == wd]
             model.Add(sum(g[(r, d)] for d in idx_wd) <= 2)
 
+    # Prioridad de vacíos
     objetivos = []
     for d in range(num_dias):
         wd = rango_fechas[d].weekday()
+        # Viernes=1, Martes=10, Miércoles=20, Resto=100
         peso = 1 if wd == 4 else (10 if wd == 1 else (20 if wd == 2 else 100))
         for r in range(num_res): objetivos.append(g[(r, d)] * peso)
     
     model.Maximize(sum(objetivos))
+    
     solver = cp_model.CpSolver()
     if solver.Solve(model) in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
         res = []
@@ -203,9 +216,20 @@ def resolver():
         return pd.DataFrame(res)
     return None
 
+
+# --- 8. EJECUCIÓN ---
+st.divider()
 if st.button("🚀 Generar Planificación Final"):
-    df_f = resolver()
-    if df_f is not None:
-        st.write(render_calendar_html(df_f), unsafe_allow_html=True)
-    else:
-        st.error("Inviable. Ajusta los parámetros.")
+    with st.spinner("Optimizando cuadrante..."):
+        df_f = resolver()
+        if df_f is not None:
+            st.write(render_calendar_html(df_f), unsafe_allow_html=True)
+            
+            # Tabla de resumen
+            st.divider()
+            st.subheader("📊 Control de Equidad")
+            conteo = df_f[df_f["Residente"] != "VACÍO"]["Residente"].value_counts().reset_index()
+            conteo.columns = ["Residente", "Total Guardias"]
+            st.table(conteo)
+        else:
+            st.error("No hay solución matemática posible. Prueba a subir algún tope de guardia o quitar alguna ausencia.")
