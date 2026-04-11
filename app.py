@@ -5,43 +5,40 @@ import calendar
 from ortools.sat.python import cp_model
 from google.cloud import firestore
 from google.oauth2 import service_account
-import textwrap  # <-- Librería clave para arreglar el error de Firebase
+import json
+import os
 
 # --- 1. CONFIGURACIÓN DE LA PÁGINA ---
 st.set_page_config(page_title="NefroPlanner Pro", layout="wide")
 
-# --- 2. CONEXIÓN A FIRESTORE (LA OPCIÓN NUCLEAR ANTIFALLOS) ---
+# --- 2. CONEXIÓN A FIRESTORE (LA VÍA SEGURA CON ARCHIVO TEMPORAL) ---
 @st.cache_resource
 def iniciar_firestore():
     try:
-        project_id = st.secrets["FIREBASE_PROJECT_ID"]
-        client_email = st.secrets["FIREBASE_CLIENT_EMAIL"]
-        raw_key = st.secrets["FIREBASE_PRIVATE_KEY"]
+        # 1. Leer los secretos exactamente como están en [connections.firestore]
+        creds_data = dict(st.secrets["connections"]["firestore"])
         
-        # --- RECONSTRUCCIÓN MATEMÁTICA DE LA CLAVE ---
-        # 1. Quitamos los encabezados, finales y cualquier \n o espacio que Streamlit haya roto
-        raw_key = raw_key.replace("-----BEGIN PRIVATE KEY-----", "")
-        raw_key = raw_key.replace("-----END PRIVATE KEY-----", "")
-        raw_key = raw_key.replace("\\n", "")
-        raw_key = "".join(raw_key.split()) # Borra absolutamente todos los espacios ocultos
+        # 2. Arreglar cualquier salto de línea que Streamlit haya roto al final
+        pk = creds_data["private_key"].replace("\\n", "\n")
+        if "=-----END" in pk and "=\n-----END" not in pk:
+            pk = pk.replace("=-----END", "=\n-----END")
+        creds_data["private_key"] = pk
+
+        # 3. Guardar esto en un archivo físico en el servidor de Streamlit
+        temp_file = "firebase_key_temp.json"
+        with open(temp_file, "w") as f:
+            json.dump(creds_data, f)
+            
+        # 4. Le decimos a Google que lea ese archivo físico
+        creds = service_account.Credentials.from_service_account_file(temp_file)
+        client = firestore.Client(credentials=creds, project=creds_data["project_id"])
         
-        # 2. Reconstruimos la clave EXACTAMENTE como la exige Google (64 caracteres por línea)
-        formatted_key = "-----BEGIN PRIVATE KEY-----\n"
-        formatted_key += "\n".join(textwrap.wrap(raw_key, 64))
-        formatted_key += "\n-----END PRIVATE KEY-----\n"
-        
-        # Creamos el diccionario perfecto
-        creds_dict = {
-            "type": "service_account",
-            "project_id": project_id,
-            "private_key": formatted_key,
-            "client_email": client_email,
-            "token_uri": "https://oauth2.googleapis.com/token"
-        }
-        
-        creds = service_account.Credentials.from_service_account_info(creds_dict)
-        client = firestore.Client(credentials=creds, project=project_id)
+        # 5. Borrar el archivo de credenciales por seguridad
+        if os.path.exists(temp_file):
+            os.remove(temp_file)
+            
         return client
+        
     except Exception as e:
         st.error(f"Error crítico al conectar con Firestore: {e}")
         return None
@@ -52,7 +49,7 @@ db = iniciar_firestore()
 def cargar_ausencias_db():
     ausencias_dict = {}
     if db is None:
-        st.warning("⚠️ No hay conexión a la base de datos. Usando memoria temporal del navegador.")
+        st.warning("⚠️ Sin conexión a Base de Datos. Usando memoria temporal.")
         return ausencias_dict
         
     try:
@@ -126,7 +123,6 @@ rango_fechas = pd.date_range(primer_dia, periods=ultimo_dia_mes)
 
 # --- 5. GESTIÓN DE AUSENCIAS ---
 st.subheader("📅 Registro de Ausencias (Rojos)")
-st.info("Los datos se cargan desde la Base de Datos. Pulsa 'Sincronizar' para guardar cambios.")
 
 tabs = st.tabs([row["Nombre"] for _, row in df_residentes.iterrows()])
 
@@ -154,7 +150,7 @@ if st.button("☁️ Sincronizar / Guardar en la Nube"):
                 if not guardar_ausencias_db(nombre, fechas):
                     exito = False
             if exito:
-                st.success("✅ ¡Datos guardados permanentemente!")
+                st.success("✅ ¡Datos guardados permanentemente en Google Cloud!")
 
 
 # --- 6. RENDERIZADO DEL CALENDARIO ---
