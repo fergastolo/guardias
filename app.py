@@ -102,7 +102,7 @@ def render_calendar_html(df_plan):
     html += '</tbody></table>'
     return html
 
-# --- 5. MOTOR DE RESOLUCIÓN (CON PRIORIDAD DE VACÍOS EN VIERNES) ---
+# --- 5. MOTOR DE RESOLUCIÓN (CON JERARQUÍA DE VACÍOS) ---
 def resolver_guardias():
     model = cp_model.CpModel()
     num_res = len(df_residentes)
@@ -119,27 +119,43 @@ def resolver_guardias():
         
         for r in range(num_res):
             nombre = df_residentes.iloc[r]["Nombre"]
+            # Restricción de Ausencias
             if rango_fechas[d] in ausencias[nombre]:
                 model.Add(guardias[(r, d)] == 0)
+            
+            # Restricción No 2 días seguidos
             if d < num_dias - 1:
                 model.Add(guardias[(r, d)] + guardias[(r, d+1)] <= 1)
+            
+            # Restricción Jueves -> Libre Vie, Sab, Dom
             if rango_fechas[d].weekday() == 3: # Jueves
                 for delta in [1, 2, 3]:
                     if d + delta < num_dias:
                         model.Add(guardias[(r, d+delta)] == 0).OnlyEnforceIf(guardias[(r, d)])
 
+    # Topes Mensuales por Residente
     for r in range(num_res):
-        model.Add(sum(guardias[(r, d)] for d in range(num_dias)) <= df_residentes.iloc[r]["Tope"])
+        tope = df_residentes.iloc[r]["Tope"]
+        model.Add(sum(guardias[(r, d)] for d in range(num_dias)) <= tope)
 
-    # --- LÓGICA DE PRIORIDAD DE VIERNES VACÍOS ---
-    # Asignamos pesos a la cobertura: 
-    # Cubrir un día normal vale 10 puntos.
-    # Cubrir un viernes vale solo 1 punto.
-    # El sistema preferirá dejar sin cubrir los de 1 punto (Viernes) si faltan manos.
+    # --- NUEVA LÓGICA DE PRIORIDADES DE COBERTURA ---
+    # Asignamos "premios" por cubrir días. El sistema maximiza estos puntos.
+    # Si tiene que dejar de cubrir algo, dejará el de menor premio.
+    
     objetivo_pesos = []
     for d in range(num_dias):
-        es_viernes = (rango_fechas[d].weekday() == 4)
-        peso = 1 if es_viernes else 10
+        weekday = rango_fechas[d].weekday()
+        
+        # Jerarquía de pesos (Premios por cubrir):
+        if weekday == 4:    # Viernes: El que menos importa cubrir (1 pto)
+            peso = 1
+        elif weekday == 1:  # Martes: Segundo candidato a quedar vacío (10 ptos)
+            peso = 10
+        elif weekday == 2:  # Miércoles: Tercer candidato a quedar vacío (20 ptos)
+            peso = 20
+        else:               # Lun, Jue, Sab, Dom: Prioridad máxima cubrir (100 ptos)
+            peso = 100
+            
         for r in range(num_res):
             objetivo_pesos.append(guardias[(r, d)] * peso)
     
