@@ -12,12 +12,16 @@ st.set_page_config(page_title="NefroPlanner Pro", layout="wide")
 # --- 2. CONEXIÓN A FIRESTORE (Base de Datos) ---
 @st.cache_resource
 def iniciar_firestore():
-    # Lee los secretos que pegaste en Streamlit Cloud
-    creds_dict = st.secrets["firestore"]
+    # 1. Cargamos el diccionario de secretos
+    creds_dict = dict(st.secrets["firestore"])
+    
+    # 2. El TRUCO: Reemplazamos los \n escapados por saltos de línea reales
+    # Esto soluciona el 100% de los errores de "ValueError" en la clave
+    creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
+    
+    # 3. Creamos las credenciales
     creds = service_account.Credentials.from_service_account_info(creds_dict)
     return firestore.Client(credentials=creds, project=creds_dict["project_id"])
-
-db = iniciar_firestore()
 
 def cargar_ausencias_db():
     ausencias_dict = {}
