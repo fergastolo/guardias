@@ -10,38 +10,57 @@ from google.oauth2 import service_account
 st.set_page_config(page_title="NefroPlanner Pro", layout="wide")
 
 # --- 2. CONEXIÓN A FIRESTORE (Base de Datos) ---
+# --- 2. CONEXIÓN A FIRESTORE (Base de Datos) ---
+
 @st.cache_resource
 def iniciar_firestore():
-    # 1. Cargamos el diccionario de secretos
-    creds_dict = dict(st.secrets["firestore"])
-    
-    # 2. El TRUCO: Reemplazamos los \n escapados por saltos de línea reales
-    # Esto soluciona el 100% de los errores de "ValueError" en la clave
-    creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
-    
-    # 3. Creamos las credenciales
-    creds = service_account.Credentials.from_service_account_info(creds_dict)
-    return firestore.Client(credentials=creds, project=creds_dict["project_id"])
+    try:
+        # Load secrets and clean the private key
+        creds_dict = dict(st.secrets["firestore"])
+        creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
+        
+        # Initialize the connection
+        creds = service_account.Credentials.from_service_account_info(creds_dict)
+        client = firestore.Client(credentials=creds, project=creds_dict["project_id"])
+        return client
+    except Exception as e:
+        st.error(f"Error crítico al conectar con Firestore: {e}")
+        return None # Return None if initialization fails
+
+# Initialize db globally
+db = iniciar_firestore()
 
 def cargar_ausencias_db():
     ausencias_dict = {}
+    
+    # Check if db was successfully initialized before querying
+    if db is None:
+        st.warning("No hay conexión a la base de datos. Usando memoria temporal.")
+        return ausencias_dict
+        
     try:
         docs = db.collection("ausencias").stream()
         for doc in docs:
             data = doc.to_dict()
-            # Convertimos los strings de la DB a objetos datetime
             fechas_obj = {datetime.strptime(f, '%Y-%m-%d') for f in data.get("fechas", [])}
             ausencias_dict[doc.id] = fechas_obj
     except Exception as e:
-        st.error(f"Error al cargar DB: {e}")
+        st.error(f"Error al leer la colección 'ausencias': {e}")
+        
     return ausencias_dict
 
 def guardar_ausencias_db(nombre, lista_fechas):
-    # Convertimos las fechas a strings para que quepan en el JSON de la DB
-    fechas_str = [f.strftime('%Y-%m-%d') for f in lista_fechas]
-    db.collection("ausencias").document(nombre).set({"fechas": fechas_str})
+    if db is None:
+        st.error("No se puede guardar: No hay conexión a Firestore.")
+        return
+        
+    try:
+        fechas_str = [f.strftime('%Y-%m-%d') for f in lista_fechas]
+        db.collection("ausencias").document(nombre).set({"fechas": fechas_str})
+    except Exception as e:
+        st.error(f"Error al guardar datos para {nombre}: {e}")
 
-# Inicializamos la memoria de la app con los datos de la DB
+# Initialize session state using the safe function
 if 'ausencias_globales' not in st.session_state:
     st.session_state.ausencias_globales = cargar_ausencias_db()
 
