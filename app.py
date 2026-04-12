@@ -37,26 +37,22 @@ def get_contrast_color(hex_color):
     return "#FFFFFF" if brightness < 150 else "#000000"
 
 def cargar_coleccion(col_name):
-    """Carga una colección de Firestore como una lista de diccionarios."""
     resultados = []
     if db is None: return resultados
     try:
         docs = db.collection(col_name).stream()
-        for doc in docs:
-            resultados.append(doc.to_dict())
+        for doc in docs: resultados.append(doc.to_dict())
     except: pass
     return resultados
 
-# --- 3. INICIALIZACIÓN DE DATOS (SIN DUPLICADOS) ---
+# --- 3. INICIALIZACIÓN DE DATOS ---
 if 'ausencias_globales' not in st.session_state:
     datos_aus = cargar_coleccion("ausencias")
-    # Convertimos strings de Firebase a objetos datetime de Python
     st.session_state.ausencias_globales = {
         item["nombre"]: {datetime.strptime(f, '%Y-%m-%d') for f in item.get("fechas", [])} 
         for item in datos_aus if "nombre" in item
     }
 
-# Cargamos plantillas desde DB o usamos valores por defecto
 if 'adjuntos_init' not in st.session_state:
     db_adj = cargar_coleccion("plantilla_adjuntos")
     st.session_state.adjuntos_init = pd.DataFrame(db_adj) if db_adj else pd.DataFrame([{"Nombre": "Adjunto 1", "Tope": 4, "Color": "#444444"}])
@@ -76,10 +72,7 @@ estilos_css = """
     .calendar-table th { background-color: #f8f9fa; padding: 10px; border: 1px solid #dee2e6; text-align: center; font-size: 1.1em; }
     .calendar-table td { height: 150px; width: 14%; border: 1px solid #dee2e6; vertical-align: top; padding: 6px; }
     .day-number { font-weight: bold; margin-bottom: 8px; color: #555; font-size: 1.1em; }
-    .adjunto-label, .residente-label { 
-        padding: 6px; border-radius: 4px; font-size: 1.0em; font-weight: bold; 
-        text-align: center; margin-top: 4px; border: 1px solid rgba(0,0,0,0.15);
-    }
+    .adjunto-label, .residente-label { padding: 6px; border-radius: 4px; font-size: 1.0em; font-weight: bold; text-align: center; margin-top: 4px; border: 1px solid rgba(0,0,0,0.15); }
     .vacio-label { font-size: 0.85em; color: #888; text-align: center; margin-top: 6px; font-style: italic; }
     .summary-table { width: 100%; border-collapse: collapse; margin-top: 20px; font-size: 1.0em; }
     .summary-table th { background-color: #e9ecef; padding: 12px; border: 1px solid #dee2e6; text-align: center; font-weight: bold; }
@@ -90,9 +83,8 @@ st.markdown(estilos_css, unsafe_allow_html=True)
 
 st.title("🏥 Planificador de Guardias Nefrología")
 
-# --- 5. SIDEBAR (PLANTILLAS) ---
-try:
-    conf_c = {"Color": st.column_config.ColorColumn("🎨 Color")}
+# --- 5. SIDEBAR ---
+try: conf_c = {"Color": st.column_config.ColorColumn("🎨 Color")}
 except: conf_c = {}
 
 st.sidebar.header("👨‍⚕️ 1. Plantilla Adjuntos")
@@ -101,9 +93,9 @@ df_adjuntos = st.sidebar.data_editor(st.session_state.adjuntos_init, num_rows="d
 st.sidebar.header("🎓 2. Plantilla Residentes")
 df_residentes = st.sidebar.data_editor(st.session_state.residentes_init, num_rows="dynamic", key="edit_res", column_config=conf_c)
 
-ADJ_COLOR_MAP = {row["Nombre"]: row["Color"] for _, row in df_adjuntos.iterrows()}
-RES_COLOR_MAP = {row["Nombre"]: row["Color"] for _, row in df_residentes.iterrows()}
-USER_R_MAP = {row["Nombre"]: row["R"] for _, row in df_residentes.iterrows() if "R" in row}
+ADJ_COLOR_MAP = {row["Nombre"]: row["Color"] for _, row in df_adjuntos.iterrows() if pd.notna(row["Nombre"])}
+RES_COLOR_MAP = {row["Nombre"]: row["Color"] for _, row in df_residentes.iterrows() if pd.notna(row["Nombre"])}
+USER_R_MAP = {row["Nombre"]: row["R"] for _, row in df_residentes.iterrows() if "R" in row and pd.notna(row["Nombre"])}
 
 st.sidebar.header("📅 3. Periodo")
 mes_nombres = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
@@ -116,52 +108,58 @@ primer_dia = datetime(anio_sel, mes_ini, 1)
 ultimo_dia = datetime(anio_sel, mes_fin, calendar.monthrange(anio_sel, mes_fin)[1])
 rango_fechas = pd.date_range(primer_dia, ultimo_dia)
 
-# --- 6. AUSENCIAS (GRILLA) ---
+# --- 6. AUSENCIAS (GRILLA REFORZADA) ---
 st.subheader("📅 Grilla de Ausencias")
 
 def generar_grilla(nombres, key_p):
-    # Generamos la grilla asegurando que solo se usen nombres únicos
-    data = {d.strftime('%d/%m'): [d in st.session_state.ausencias_globales.get(n, set()) for n in nombres] for d in rango_fechas}
-    return st.data_editor(pd.DataFrame(data, index=nombres), use_container_width=True, key=f"g_{key_p}", column_config={c: st.column_config.CheckboxColumn(c) for c in data.keys()})
+    # Forzamos que si el nombre no existe en el set de ausencias, el valor sea False
+    grid_data = {}
+    for d in rango_fechas:
+        col_name = d.strftime('%d/%m')
+        # Si el nombre no está en st.session_state, d in set() siempre es False
+        grid_data[col_name] = [d in st.session_state.ausencias_globales.get(n, set()) if pd.notna(n) else False for n in nombres]
+    
+    return st.data_editor(
+        pd.DataFrame(grid_data, index=nombres), 
+        use_container_width=True, 
+        key=f"g_{key_p}", 
+        column_config={c: st.column_config.CheckboxColumn(c) for c in grid_data.keys()}
+    )
 
 t1, t2 = st.tabs(["👨‍⚕️ Adjuntos", "🎓 Residentes"])
 with t1: g_adj = generar_grilla(df_adjuntos["Nombre"].tolist(), "adj")
 with t2: g_res = generar_grilla(df_residentes["Nombre"].tolist(), "res")
 
 if st.button("☁️ Sincronizar y Guardar TODO"):
-    with st.spinner("Guardando y limpiando duplicados..."):
-        # 1. Guardar Adjuntos (Usando Nombre como ID para evitar duplicados)
+    with st.spinner("Sincronizando..."):
+        # Guardar Plantillas
         for _, row in df_adjuntos.iterrows():
-            db.collection("plantilla_adjuntos").document(row["Nombre"]).set(row.to_dict())
-        
-        # 2. Guardar Residentes
+            if pd.notna(row["Nombre"]): db.collection("plantilla_adjuntos").document(row["Nombre"]).set(row.to_dict())
         for _, row in df_residentes.iterrows():
-            db.collection("plantilla_residentes").document(row["Nombre"]).set(row.to_dict())
+            if pd.notna(row["Nombre"]): db.collection("plantilla_residentes").document(row["Nombre"]).set(row.to_dict())
         
-        # 3. Sincronizar Ausencias
+        # Sincronizar Ausencias
         for g, nombres in [(g_adj, df_adjuntos["Nombre"].tolist()), (g_res, df_residentes["Nombre"].tolist())]:
             for nom in nombres:
+                if pd.isna(nom) or nom == "": continue
                 row_data = g.loc[nom]
                 nuevas = {rango_fechas[i] for i, v in enumerate(row_data) if v}
-                # Mantener ausencias de meses no visibles
                 fuera = {d for d in st.session_state.ausencias_globales.get(nom, set()) if not (primer_dia <= d <= ultimo_dia)}
                 final = nuevas.union(fuera)
                 st.session_state.ausencias_globales[nom] = final
-                db.collection("ausencias").document(nom).set({
-                    "nombre": nom,
-                    "fechas": [d.strftime('%Y-%m-%d') for d in final]
-                })
-        st.success("✅ ¡Datos limpios y guardados!")
+                db.collection("ausencias").document(nom).set({"nombre": nom, "fechas": [d.strftime('%Y-%m-%d') for d in final]})
+        
+        st.success("✅ ¡Guardado! Datos limpios.")
         st.rerun()
 
-# --- 7. MOTOR (LÓGICA DE BALANCEO) ---
+# --- 7. MOTOR ---
 def resolver():
     model = cp_model.CpModel()
     num_dias = len(rango_fechas)
-    def aplicar_reglas(staff, prefix, es_adjunto):
+    def aplicar_reglas(staff, prefix, es_adj):
         n = len(staff); v = {(r, d): model.NewBoolVar(f'{prefix}_r{r}d{d}') for r in range(n) for d in range(num_dias)}
         for d in range(num_dias):
-            if es_adjunto: model.Add(sum(v[(r, d)] for r in range(n)) == 1)
+            if es_adj: model.Add(sum(v[(r, d)] for r in range(n)) == 1)
             else: model.Add(sum(v[(r, d)] for r in range(n)) <= 1)
             for r in range(n):
                 nom = staff.iloc[r]["Nombre"]
@@ -169,20 +167,18 @@ def resolver():
                 if d < num_dias - 1: model.Add(v[(r, d)] + v[(r, d+1)] <= 1)
                 if rango_fechas[d].weekday() == 5 and d + 5 < num_dias: model.Add(v[(r, d+5)] == 0).OnlyEnforceIf(v[(r, d)])
                 if rango_fechas[d].weekday() == 3 and d + 2 < num_dias: model.Add(v[(r, d+2)] == 0).OnlyEnforceIf(v[(r, d)])
-                if not es_adjunto and rango_fechas[d].weekday() == 4 and d + 2 < num_dias: model.Add(v[(r, d)] <= v[(r, d+2)])
+                if not es_adj and rango_fechas[d].weekday() == 4 and d + 2 < num_dias: model.Add(v[(r, d)] <= v[(r, d+2)])
         objs = []
         for mes in list(set(rango_fechas.month)):
             idx_m = [d for d in range(num_dias) if rango_fechas[d].month == mes]
-            dias_bal = [0, 3, 5, 6]
             for r in range(n):
                 t = staff.iloc[r]["Tope"]; model.Add(sum(v[(r, d)] for d in idx_m) <= t)
-                for wd in dias_bal:
+                for wd in [0, 3, 5, 6]:
                     idx_wd = [d for d in idx_m if rango_fechas[d].weekday() == wd]
                     suma_wd = sum(v[(r, d)] for d in idx_wd)
                     model.Add(suma_wd <= 2)
                     h2 = model.NewBoolVar(f'{prefix}_r{r}m{mes}wd{wd}_h2')
-                    model.Add(suma_wd <= 1 + h2)
-                    objs.append(h2 * -80000)
+                    model.Add(suma_wd <= 1 + h2); objs.append(h2 * -80000)
         for d in range(num_dias):
             wd = rango_fechas[d].weekday()
             pb = 100000 if wd == 4 else (101000 if wd == 1 else (102000 if wd == 2 else 110000))
@@ -204,7 +200,7 @@ def resolver():
         return pd.DataFrame(res)
     return None
 
-# --- 8. RENDERIZADO CALENDARIO ---
+# --- 8. RENDER ---
 def render_mes_html(df, m):
     cal = calendar.Calendar(firstweekday=0)
     html = f'<h3 class="mes-titulo">{mes_nombres[m-1]} {anio_sel}</h3><table class="calendar-table"><thead><tr>'
@@ -217,9 +213,7 @@ def render_mes_html(df, m):
             else:
                 f_str = f"{anio_sel}-{m:02d}-{day:02d}"
                 rows = df[df["Fecha"] == f_str]
-                if rows.empty: 
-                    html += f'<td><div class="day-number">{day}</div><div class="vacio-label">ERROR</div></td>'
-                    continue
+                if rows.empty: continue
                 row = rows.iloc[0]
                 html += f'<td><div class="day-number">{day}</div>'
                 if row["Adjunto"] != "VACÍO":
@@ -247,9 +241,7 @@ if st.button("🚀 Generar Planificación", type="primary"):
             t = pd.crosstab(lbl, df_v["Dia"])
             for d in ds:
                 if d not in t.columns: t[d] = 0
-            t = t[ds].reindex(ord_p, fill_value=0)
-            t["TOTAL"] = t.sum(axis=1)
-            return t
+            return t[ds].reindex(ord_p, fill_value=0)
         
         t_adj = build_stats(df_f, "Adjunto", df_adjuntos, False)
         t_res = build_stats(df_f, "Residente", df_residentes, True)
