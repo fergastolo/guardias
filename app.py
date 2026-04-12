@@ -19,7 +19,6 @@ def iniciar_firestore():
         b64_string = st.secrets["FIREBASE_B64"]
         json_string = base64.b64decode(b64_string).decode('utf-8')
         creds_dict = json.loads(json_string)
-        
         creds = service_account.Credentials.from_service_account_info(creds_dict)
         client = firestore.Client(credentials=creds, project=creds_dict["project_id"])
         return client
@@ -55,32 +54,45 @@ if 'ausencias_globales' not in st.session_state:
 if 'plan_generado' not in st.session_state:
     st.session_state.plan_generado = None
 
-
 # --- 3. ESTILOS CSS ---
 estilos_css = """
 <style>
     body { font-family: sans-serif; }
     .calendar-table { width: 100%; border-collapse: collapse; margin-bottom: 30px; }
     .calendar-table th { background-color: #f8f9fa; padding: 10px; border: 1px solid #dee2e6; text-align: center; }
-    .calendar-table td { height: 115px; width: 14%; border: 1px solid #dee2e6; vertical-align: top; padding: 5px; }
+    .calendar-table td { height: 140px; width: 14%; border: 1px solid #dee2e6; vertical-align: top; padding: 5px; }
     .day-number { font-weight: bold; margin-bottom: 5px; color: #555; }
-    .residente-label { 
-        padding: 6px; border-radius: 4px; font-size: 0.82em; font-weight: bold; 
-        text-align: center; margin-top: 8px; color: #1a1a1a; border: 1px solid rgba(0,0,0,0.1);
+    
+    .adjunto-label { 
+        padding: 4px; border-radius: 4px; font-size: 0.75em; font-weight: bold; 
+        text-align: center; margin-top: 2px; color: #fff; background-color: #444; border: 1px solid rgba(0,0,0,0.1);
     }
+    .residente-label { 
+        padding: 4px; border-radius: 4px; font-size: 0.75em; font-weight: bold; 
+        text-align: center; margin-top: 4px; color: #1a1a1a; border: 1px solid rgba(0,0,0,0.1);
+    }
+    .vacio-label { font-size: 0.7em; color: #aaa; text-align: center; margin-top: 4px; font-style: italic; }
+    
     .mes-titulo { color: #2c3e50; margin-top: 20px; border-bottom: 2px solid #eee; padding-bottom: 10px; }
     .summary-table { width: 100%; border-collapse: collapse; margin-top: 20px; margin-bottom: 40px; font-size: 0.95em; }
-    .summary-table th { background-color: #e9ecef; padding: 12px; border: 1px solid #dee2e6; text-align: center; font-weight: bold; color: #333;}
-    .summary-table td { padding: 10px; border: 1px solid #dee2e6; text-align: center; color: #111; }
-    .summary-table tr:last-child { font-weight: bold; background-color: #f8f9fa; }
+    .summary-table th { background-color: #e9ecef; padding: 12px; border: 1px solid #dee2e6; text-align: center; font-weight: bold; }
+    .summary-table td { padding: 10px; border: 1px solid #dee2e6; text-align: center; }
 </style>
 """
 st.markdown(estilos_css, unsafe_allow_html=True)
 
-st.title("🏥 Planificador de Guardias")
+st.title("🏥 Planificador de Guardias Nefrología")
 
-# --- 4. CONFIGURACIÓN DE PLANTILLA ---
-st.sidebar.header("1. Plantilla de Residentes")
+# --- 4. CONFIGURACIÓN DE PLANTILLAS (Sidebar) ---
+st.sidebar.header("👨‍⚕️ 1. Plantilla Adjuntos")
+df_adj_init = pd.DataFrame([
+    {"Nombre": "Adjunto 1", "Tope": 4, "Color": "#444444"},
+    {"Nombre": "Adjunto 2", "Tope": 4, "Color": "#444444"},
+    {"Nombre": "Adjunto 3", "Tope": 4, "Color": "#444444"},
+])
+df_adjuntos = st.sidebar.data_editor(df_adj_init, num_rows="dynamic", key="editor_adj")
+
+st.sidebar.header("🎓 2. Plantilla Residentes")
 df_res_init = pd.DataFrame([
     {"Nombre": "Daniela", "Tope": 6, "R": "R4", "Color": "#FFC1CC"},
     {"Nombre": "Sandra", "Tope": 6, "R": "R3", "Color": "#FFDAB9"},
@@ -90,22 +102,18 @@ df_res_init = pd.DataFrame([
     {"Nombre": "Residente A", "Tope": 2, "R": "R1", "Color": "#E6B3FF"},
     {"Nombre": "Residente B", "Tope": 2, "R": "R1", "Color": "#B3FFB3"},
 ])
-df_residentes = st.sidebar.data_editor(df_res_init, num_rows="dynamic")
+df_residentes = st.sidebar.data_editor(df_res_init, num_rows="dynamic", key="editor_res")
 
-USER_COLOR_MAP = {row["Nombre"]: row["Color"] for _, row in df_residentes.iterrows()}
+ADJ_COLOR_MAP = {row["Nombre"]: row["Color"] for _, row in df_adjuntos.iterrows()}
+RES_COLOR_MAP = {row["Nombre"]: row["Color"] for _, row in df_residentes.iterrows()}
 USER_R_MAP = {row["Nombre"]: row["R"] for _, row in df_residentes.iterrows()}
 
-st.sidebar.header("2. Periodo de Planificación")
+st.sidebar.header("📅 3. Periodo")
 mes_nombres = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
-
 col_a, col_b = st.sidebar.columns(2)
-mes_ini = col_a.selectbox("Mes Inicio", range(1, 13), index=5, format_func=lambda x: mes_nombres[x-1])
-mes_fin = col_b.selectbox("Mes Fin", range(1, 13), index=8, format_func=lambda x: mes_nombres[x-1])
+mes_ini = col_a.selectbox("Inicio", range(1, 13), index=5, format_func=lambda x: mes_nombres[x-1])
+mes_fin = col_b.selectbox("Fin", range(1, 13), index=8, format_func=lambda x: mes_nombres[x-1])
 anio_sel = st.sidebar.number_input("Año", value=2026)
-
-if mes_fin < mes_ini:
-    st.sidebar.error("El Mes Fin debe ser igual o posterior al Mes Inicio.")
-    st.stop()
 
 primer_dia = datetime(anio_sel, mes_ini, 1)
 ultimo_dia_mes_val = calendar.monthrange(anio_sel, mes_fin)[1]
@@ -113,41 +121,44 @@ ultimo_dia = datetime(anio_sel, mes_fin, ultimo_dia_mes_val)
 rango_fechas = pd.date_range(primer_dia, ultimo_dia)
 
 
-# --- 5. GESTIÓN DE AUSENCIAS (GRILLA DE CHECKBOXES) ---
-st.subheader("📅 Grilla de Ausencias (Días Rojos)")
-st.info("Marca con un ✅ los días que el residente NO puede hacer guardia.")
+# --- 5. GESTIÓN DE AUSENCIAS (GRILLA) ---
+st.subheader("📅 Grilla de Ausencias")
 
-nombres_res = df_residentes["Nombre"].tolist()
-data_ausencias = {}
-for d in rango_fechas:
-    col_name = d.strftime('%d/%m')
-    data_ausencias[col_name] = [d in st.session_state.ausencias_globales.get(nom, set()) for nom in nombres_res]
+def generar_grilla(nombres, key_prefix):
+    data = {}
+    for d in rango_fechas:
+        col_name = d.strftime('%d/%m')
+        data[col_name] = [d in st.session_state.ausencias_globales.get(nom, set()) for nom in nombres]
+    df = pd.DataFrame(data, index=nombres)
+    return st.data_editor(df, use_container_width=True, key=f"grid_{key_prefix}",
+                         column_config={c: st.column_config.CheckboxColumn(c) for c in data.keys()})
 
-df_grid_ausencias = pd.DataFrame(data_ausencias, index=nombres_res)
+col_abs_adj, col_abs_res = st.tabs(["👨‍⚕️ Adjuntos", "🎓 Residentes"])
 
-grid_editada = st.data_editor(
-    df_grid_ausencias, 
-    use_container_width=True,
-    column_config={col: st.column_config.CheckboxColumn(col) for col in data_ausencias.keys()}
-)
+with col_abs_adj:
+    grid_adj = generar_grilla(df_adjuntos["Nombre"].tolist(), "adj")
+with col_abs_res:
+    grid_res = generar_grilla(df_residentes["Nombre"].tolist(), "res")
 
 if st.button("☁️ Sincronizar y Guardar en la Nube"):
-    for nom in nombres_res:
-        row = grid_editada.loc[nom]
-        nuevas = {rango_fechas[i] for i, val in enumerate(row) if val}
-        fuera = {d for d in st.session_state.ausencias_globales.get(nom, set()) if not (primer_dia <= d <= ultimo_dia)}
-        st.session_state.ausencias_globales[nom] = nuevas.union(fuera)
+    for df_grid in [grid_adj, grid_res]:
+        for nom in df_grid.index:
+            row = df_grid.loc[nom]
+            nuevas = {rango_fechas[i] for i, val in enumerate(row) if val}
+            fuera = {d for d in st.session_state.ausencias_globales.get(nom, set()) if not (primer_dia <= d <= ultimo_dia)}
+            st.session_state.ausencias_globales[nom] = nuevas.union(fuera)
     
     with st.spinner("Guardando en Firestore..."):
-        exito = True
         for nom, fechas in st.session_state.ausencias_globales.items():
-            if not guardar_ausencias_db(nom, fechas): exito = False
-        if exito: st.success("✅ Ausencias guardadas correctamente.")
+            guardar_ausencias_db(nom, fechas)
+        st.success("✅ Datos guardados.")
 
 
 # --- 6. RENDERIZADO DEL CALENDARIO ---
 def render_mes_html(df_plan, mes_objetivo):
-    plan_dict = {row['Fecha']: row['Residente'] for _, row in df_plan.iterrows()}
+    plan_adj = {row['Fecha']: row['Adjunto'] for _, row in df_plan.iterrows()}
+    plan_res = {row['Fecha']: row['Residente'] for _, row in df_plan.iterrows()}
+    
     cal = calendar.Calendar(firstweekday=0)
     month_days = cal.monthdayscalendar(anio_sel, mes_objetivo)
     
@@ -162,11 +173,19 @@ def render_mes_html(df_plan, mes_objetivo):
             if day == 0: html += '<td style="background-color: #f1f1f1;"></td>'
             else:
                 f_str = f"{anio_sel}-{mes_objetivo:02d}-{day:02d}"
-                res = plan_dict.get(f_str, "VACÍO")
-                color = USER_COLOR_MAP.get(res, "#ffffff")
-                label = f"{res} ({USER_R_MAP.get(res, '')})" if res != "VACÍO" else "VACÍO"
-                style = f'background-color: {color};' if res != "VACÍO" else ""
-                html += f'<td><div class="day-number">{day}</div><div class="residente-label" style="{style}">{label}</div></td>'
+                adj = plan_adj.get(f_str, "VACÍO")
+                res = plan_res.get(f_str, "VACÍO")
+                
+                html += f'<td><div class="day-number">{day}</div>'
+                if adj != "VACÍO":
+                    html += f'<div class="adjunto-label" style="background-color: {ADJ_COLOR_MAP.get(adj, "#444")};">{adj}</div>'
+                else:
+                    html += f'<div class="vacio-label">Adj: VACÍO</div>'
+                if res != "VACÍO":
+                    html += f'<div class="residente-label" style="background-color: {RES_COLOR_MAP.get(res, "#fff")};">{res} ({USER_R_MAP.get(res, "")})</div>'
+                else:
+                    html += f'<div class="vacio-label">Res: VACÍO</div>'
+                html += '</td>'
         html += '</tr>'
     html += '</tbody></table>'
     return html
@@ -175,61 +194,79 @@ def render_mes_html(df_plan, mes_objetivo):
 # --- 7. MOTOR DE RESOLUCIÓN ---
 def resolver():
     model = cp_model.CpModel()
-    num_res, num_dias = len(df_residentes), len(rango_fechas)
-    g = {}
+    num_dias = len(rango_fechas)
     
-    for r in range(num_res):
-        for d in range(num_dias): g[(r, d)] = model.NewBoolVar(f'r{r}d{d}')
-    
-    for d in range(num_dias):
-        model.Add(sum(g[(r, d)] for r in range(num_res)) <= 1)
-        for r in range(num_res):
-            nombre = df_residentes.iloc[r]["Nombre"]
-            if rango_fechas[d] in st.session_state.ausencias_globales.get(nombre, set()):
-                model.Add(g[(r, d)] == 0)
-            if d < num_dias - 1: model.Add(g[(r, d)] + g[(r, d+1)] <= 1)
-            if rango_fechas[d].weekday() == 3: # Jueves
-                for dt in [1, 2, 3]:
-                    if d + dt < num_dias: model.Add(g[(r, d+dt)] == 0).OnlyEnforceIf(g[(r, d)])
-            if rango_fechas[d].weekday() == 4: # Viernes
-                if d + 2 < num_dias: # Domingo
-                    model.Add(g[(r, d)] <= g[(r, d+2)])
-    
-    objetivos = []
-    meses_presentes = list(set(rango_fechas.month))
-    for mes in meses_presentes:
-        indices_del_mes = [d for d in range(num_dias) if rango_fechas[d].month == mes]
-        idx_findes = [d for d in indices_del_mes if rango_fechas[d].weekday() in [5, 6]]
-        for r in range(num_res):
-            tope_mensual = df_residentes.iloc[r]["Tope"]
-            model.Add(sum(g[(r, d)] for d in indices_del_mes) <= tope_mensual)
-            max_findes = 2 if tope_mensual >= 4 else 1
-            model.Add(sum(g[(r, d)] for d in idx_findes) <= max_findes)
-            for wd in range(7): 
-                idx_wd_mes = [d for d in indices_del_mes if rango_fechas[d].weekday() == wd]
-                suma_dias = sum(g[(r, d)] for d in idx_wd_mes)
-                model.Add(suma_dias <= 2)
-                hace_dos = model.NewBoolVar(f'r{r}_m{mes}_wd{wd}_hace_dos')
-                model.Add(suma_dias <= 1 + hace_dos)
-                objetivos.append(hace_dos * -50000)
+    def crear_variables_y_reglas(df_staff, prefix):
+        num_staff = len(df_staff)
+        vars = {}
+        for r in range(num_staff):
+            for d in range(num_dias): vars[(r, d)] = model.NewBoolVar(f'{prefix}_s{r}d{d}')
+        
+        for d in range(num_dias):
+            model.Add(sum(vars[(r, d)] for r in range(num_staff)) <= 1)
+            for r in range(num_staff):
+                nom = df_staff.iloc[r]["Nombre"]
+                if rango_fechas[d] in st.session_state.ausencias_globales.get(nom, set()):
+                    model.Add(vars[(r, d)] == 0)
+                
+                # Prohibido 2 días seguidos
+                if d < num_dias - 1: model.Add(vars[(r, d)] + vars[(r, d+1)] <= 1)
+                
+                # REGLA: Si hace Jueves (wd 3) -> Prohibido Sábado (d+2)
+                if rango_fechas[d].weekday() == 3:
+                    if d + 2 < num_dias:
+                        model.Add(vars[(r, d+2)] == 0).OnlyEnforceIf(vars[(r, d)])
+                
+                # REGLA: Si hace Sábado (wd 5) -> Prohibido Jueves siguiente (d+5)
+                if rango_fechas[d].weekday() == 5:
+                    if d + 5 < num_dias:
+                        model.Add(vars[(r, d+5)] == 0).OnlyEnforceIf(vars[(r, d)])
 
-    for d in range(num_dias):
-        wd = rango_fechas[d].weekday()
-        peso_base = 100000 if wd == 4 else (101000 if wd == 1 else (102000 if wd == 2 else 110000))
-        for r in range(num_res): 
-            peso_final = peso_base + random.randint(1, 999) 
-            objetivos.append(g[(r, d)] * peso_final)
+                # Doblete Viernes -> Domingo
+                if rango_fechas[d].weekday() == 4:
+                    if d + 2 < num_dias: model.Add(vars[(r, d)] <= vars[(r, d+2)])
+
+        obj_list = []
+        meses = list(set(rango_fechas.month))
+        for m in meses:
+            idx_mes = [d for d in range(num_dias) if rango_fechas[d].month == m]
+            idx_findes = [d for d in idx_mes if rango_fechas[d].weekday() in [5, 6]]
+            for r in range(num_staff):
+                tope = df_staff.iloc[r]["Tope"]
+                model.Add(sum(vars[(r, d)] for d in idx_mes) <= tope)
+                max_f = 2 if tope >= 4 else 1
+                model.Add(sum(vars[(r, d)] for d in idx_findes) <= max_f)
+                for wd in range(7):
+                    idx_wd = [d for d in idx_mes if rango_fechas[d].weekday() == wd]
+                    model.Add(sum(vars[(r, d)] for d in idx_wd) <= 2)
+                    h2 = model.NewBoolVar(f'{prefix}_r{r}m{m}wd{wd}_h2')
+                    model.Add(sum(vars[(r, d)] for d in idx_wd) <= 1 + h2)
+                    obj_list.append(h2 * -50000)
+        
+        for d in range(num_dias):
+            wd = rango_fechas[d].weekday()
+            pb = 100000 if wd == 4 else (101000 if wd == 1 else (102000 if wd == 2 else 110000))
+            for r in range(num_staff):
+                pf = pb + random.randint(1, 999)
+                obj_list.append(vars[(r, d)] * pf)
+        return vars, obj_list
+
+    v_adj, o_adj = crear_variables_y_reglas(df_adjuntos, "adj")
+    v_res, o_res = crear_variables_y_reglas(df_residentes, "res")
     
-    model.Maximize(sum(objetivos))
+    model.Maximize(sum(o_adj) + sum(o_res))
     solver = cp_model.CpSolver()
     if solver.Solve(model) in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-        res = []
+        res_list = []
         for d in range(num_dias):
-            nom = "VACÍO"
-            for r in range(num_res):
-                if solver.Value(g[(r, d)]) == 1: nom = df_residentes.iloc[r]["Nombre"]
-            res.append({"Fecha": rango_fechas[d].strftime('%Y-%m-%d'), "Residente": nom})
-        return pd.DataFrame(res)
+            a_nom = "VACÍO"
+            for r in range(len(df_adjuntos)):
+                if solver.Value(v_adj[(r, d)]) == 1: a_nom = df_adjuntos.iloc[r]["Nombre"]
+            r_nom = "VACÍO"
+            for r in range(len(df_residentes)):
+                if solver.Value(v_res[(r, d)]) == 1: r_nom = df_residentes.iloc[r]["Nombre"]
+            res_list.append({"Fecha": rango_fechas[d].strftime('%Y-%m-%d'), "Adjunto": a_nom, "Residente": r_nom})
+        return pd.DataFrame(res_list)
     return None
 
 
@@ -239,66 +276,54 @@ if st.button("🚀 Generar Planificación Final", type="primary"):
     with st.spinner("Optimizando cuadrante..."):
         df_f = resolver()
         if df_f is not None:
-            # 1. Tabla Resumen Guardias (Ordenada)
-            df_valid = df_f[df_f["Residente"] != "VACÍO"].copy()
-            df_valid["Fecha"] = pd.to_datetime(df_valid["Fecha"])
-            dias_semana_str = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
-            df_valid["Dia"] = df_valid["Fecha"].dt.weekday.map(lambda x: dias_semana_str[x])
-            df_valid["Residente_R"] = df_valid["Residente"].apply(lambda x: f"{x} ({USER_R_MAP.get(x, '')})")
-            tabla_g = pd.crosstab(df_valid["Residente_R"], df_valid["Dia"])
-            for d in dias_semana_str:
-                if d not in tabla_g.columns: tabla_g[d] = 0
-            tabla_g = tabla_g[dias_semana_str]
-            orden_plantilla = [f"{row['Nombre']} ({row['R']})" for _, row in df_residentes.iterrows()]
-            tabla_g = tabla_g.reindex(orden_plantilla, fill_value=0)
-            tabla_g["Total Guardias"] = tabla_g.sum(axis=1)
-            tabla_g.loc["Total Cobertura"] = tabla_g.sum(axis=0)
+            def build_stats(df, col, staff_df, staff_type):
+                df_v = df[df[col] != "VACÍO"].copy()
+                df_v["Fecha"] = pd.to_datetime(df_v["Fecha"])
+                ds = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
+                df_v["Dia"] = df_v["Fecha"].dt.weekday.map(lambda x: ds[x])
+                if staff_type == "res":
+                    df_v["Label"] = df_v[col].apply(lambda x: f"{x} ({USER_R_MAP.get(x, '')})")
+                    orden = [f"{r['Nombre']} ({r['R']})" for _, r in staff_df.iterrows()]
+                else:
+                    df_v["Label"] = df_v[col]
+                    orden = staff_df["Nombre"].tolist()
+                t = pd.crosstab(df_v["Label"], df_v["Dia"])
+                for d in ds:
+                    if d not in t.columns: t[d] = 0
+                t = t[ds].reindex(orden, fill_value=0)
+                t["Total"] = t.sum(axis=1)
+                t.loc["Total Cobertura"] = t.sum(axis=0)
+                return t
+
+            t_adj = build_stats(df_f, "Adjunto", df_adjuntos, "adj")
+            t_res = build_stats(df_f, "Residente", df_residentes, "res")
+            v_data = []
+            for _, r in pd.concat([df_adjuntos, df_residentes]).iterrows():
+                count = sum(1 for d in st.session_state.ausencias_globales.get(r['Nombre'], set()) if primer_dia <= d <= ultimo_dia and d.weekday() < 5)
+                v_data.append({"Nombre": r['Nombre'], "Días Vacaciones": count})
+            df_vac = pd.DataFrame(v_data).set_index("Nombre")
             
-            # 2. Tabla Resumen Vacaciones (Lunes a Viernes, Ordenada)
-            vac_data = []
-            for _, row in df_residentes.iterrows():
-                nom = row["Nombre"]
-                r_tag = row["R"]
-                rojos = st.session_state.ausencias_globales.get(nom, set())
-                count = sum(1 for d in rojos if primer_dia <= d <= ultimo_dia and d.weekday() < 5)
-                vac_data.append({"Residente": f"{nom} ({r_tag})", "Días Vacaciones (Lun-Vie)": count})
-            df_vac = pd.DataFrame(vac_data).set_index("Residente")
+            html = f"<html><head><meta charset='utf-8'>{estilos_css}</head><body>"
+            html += "<h1>🏥 Planificación Nefrología</h1>"
+            for m in range(mes_ini, mes_fin + 1): html += render_mes_html(df_f, m)
+            html += "<hr><h2>👨‍⚕️ Resumen Adjuntos</h2>" + t_adj.to_html(classes="summary-table")
+            html += "<h2>🎓 Resumen Residentes</h2>" + t_res.to_html(classes="summary-table")
+            html += "<h2>🏖️ Vacaciones</h2>" + df_vac.to_html(classes="summary-table")
+            html += "</body></html>"
             
-            # 3. CSV y HTML
-            csv_string = df_valid[["Fecha", "Dia", "Residente_R"]].to_csv(index=False).encode('utf-8')
-            
-            html_descarga = f"<html><head><meta charset='utf-8'>{estilos_css}</head><body>"
-            html_descarga += "<h1>🏥 Planificación de Guardias</h1>"
-            meses_a_pintar = range(mes_ini, mes_fin + 1)
-            for m in meses_a_pintar: html_descarga += render_mes_html(df_f, m)
-            html_descarga += "<hr><h2>📊 Resumen de Guardias y Cobertura</h2>"
-            html_descarga += tabla_g.to_html(classes="summary-table", border=0, justify="center")
-            html_descarga += "<h2>🏖️ Resumen de Vacaciones (Días Laborables)</h2>"
-            html_descarga += df_vac.to_html(classes="summary-table", border=0, justify="center")
-            html_descarga += "</body></html>"
-            
-            # Guardar en memoria de sesión (Corregido el nombre de variable csv_data)
             st.session_state.plan_generado = {
-                "df_f": df_f, 
-                "html": html_descarga, 
-                "tabla_g": tabla_g, 
-                "tabla_v": df_vac, 
-                "csv": csv_string, 
-                "meses": meses_a_pintar
+                "df_f": df_f, "html": html, "t_adj": t_adj, "t_res": t_res, "t_vac": df_vac, "meses": range(mes_ini, mes_fin+1)
             }
-        else:
-            st.session_state.plan_generado = None
-            st.error("❌ Sin solución matemática.")
+        else: st.error("❌ Sin solución matemática.")
 
 if st.session_state.plan_generado:
-    datos = st.session_state.plan_generado
-    for m in datos["meses"]: st.write(render_mes_html(datos["df_f"], m), unsafe_allow_html=True)
+    d = st.session_state.plan_generado
+    for m in d["meses"]: st.write(render_mes_html(d["df_f"], m), unsafe_allow_html=True)
     st.divider()
-    st.subheader("📊 Resumen de Guardias y Cobertura")
-    st.dataframe(datos["tabla_g"].style.format(precision=0), use_container_width=True)
-    st.subheader("🏖️ Resumen de Vacaciones (Días Laborables)")
-    st.dataframe(datos["tabla_v"].style.format(precision=0), use_container_width=True)
-    st.divider()
-    col1, col2 = st.columns(2)
-    col1.download_button("🎨 Descargar Planificación Visual (HTML)", datos["html"], "Plan_Guardias.html", "text/html", type="primary")
-    col2.download_button("📊 Descargar Datos (CSV)", datos["csv"], "Datos_Guardias.csv", "text/csv")
+    st.subheader("👨‍⚕️ Adjuntos")
+    st.dataframe(d["t_adj"].style.format(precision=0), use_container_width=True)
+    st.subheader("🎓 Residentes")
+    st.dataframe(d["t_res"].style.format(precision=0), use_container_width=True)
+    st.subheader("🏖️ Vacaciones")
+    st.dataframe(d["t_vac"].style.format(precision=0), use_container_width=True)
+    st.download_button("🎨 Descargar HTML", d["html"], "Plan.html", "text/html", type="primary")
