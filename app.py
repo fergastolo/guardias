@@ -65,7 +65,7 @@ estilos_css = """
     
     .adjunto-label { 
         padding: 4px; border-radius: 4px; font-size: 0.75em; font-weight: bold; 
-        text-align: center; margin-top: 2px; color: #fff; background-color: #444; border: 1px solid rgba(0,0,0,0.1);
+        text-align: center; margin-top: 2px; color: #fff; border: 1px solid rgba(0,0,0,0.1);
     }
     .residente-label { 
         padding: 4px; border-radius: 4px; font-size: 0.75em; font-weight: bold; 
@@ -83,14 +83,23 @@ st.markdown(estilos_css, unsafe_allow_html=True)
 
 st.title("🏥 Planificador de Guardias Nefrología")
 
-# --- 4. CONFIGURACIÓN DE PLANTILLAS (Sidebar) ---
+# --- 4. CONFIGURACIÓN DE PLANTILLAS CON SELECTOR DE COLOR ---
 st.sidebar.header("👨‍⚕️ 1. Plantilla Adjuntos")
 df_adj_init = pd.DataFrame([
     {"Nombre": "Adjunto 1", "Tope": 4, "Color": "#444444"},
-    {"Nombre": "Adjunto 2", "Tope": 4, "Color": "#444444"},
-    {"Nombre": "Adjunto 3", "Tope": 4, "Color": "#444444"},
+    {"Nombre": "Adjunto 2", "Tope": 4, "Color": "#555555"},
+    {"Nombre": "Adjunto 3", "Tope": 4, "Color": "#666666"},
 ])
-df_adjuntos = st.sidebar.data_editor(df_adj_init, num_rows="dynamic", key="editor_adj")
+
+# Aquí activamos el ColorColumn
+df_adjuntos = st.sidebar.data_editor(
+    df_adj_init, 
+    num_rows="dynamic", 
+    key="editor_adj",
+    column_config={
+        "Color": st.column_config.ColorColumn("🎨 Color")
+    }
+)
 
 st.sidebar.header("🎓 2. Plantilla Residentes")
 df_res_init = pd.DataFrame([
@@ -102,7 +111,16 @@ df_res_init = pd.DataFrame([
     {"Nombre": "Residente A", "Tope": 2, "R": "R1", "Color": "#E6B3FF"},
     {"Nombre": "Residente B", "Tope": 2, "R": "R1", "Color": "#B3FFB3"},
 ])
-df_residentes = st.sidebar.data_editor(df_res_init, num_rows="dynamic", key="editor_res")
+
+# Aquí también activamos el ColorColumn para los residentes
+df_residentes = st.sidebar.data_editor(
+    df_res_init, 
+    num_rows="dynamic", 
+    key="editor_res",
+    column_config={
+        "Color": st.column_config.ColorColumn("🎨 Color")
+    }
+)
 
 ADJ_COLOR_MAP = {row["Nombre"]: row["Color"] for _, row in df_adjuntos.iterrows()}
 RES_COLOR_MAP = {row["Nombre"]: row["Color"] for _, row in df_residentes.iterrows()}
@@ -119,7 +137,6 @@ primer_dia = datetime(anio_sel, mes_ini, 1)
 ultimo_dia_mes_val = calendar.monthrange(anio_sel, mes_fin)[1]
 ultimo_dia = datetime(anio_sel, mes_fin, ultimo_dia_mes_val)
 rango_fechas = pd.date_range(primer_dia, ultimo_dia)
-
 
 # --- 5. GESTIÓN DE AUSENCIAS (GRILLA) ---
 st.subheader("📅 Grilla de Ausencias")
@@ -152,7 +169,6 @@ if st.button("☁️ Sincronizar y Guardar en la Nube"):
         for nom, fechas in st.session_state.ausencias_globales.items():
             guardar_ausencias_db(nom, fechas)
         st.success("✅ Datos guardados.")
-
 
 # --- 6. RENDERIZADO DEL CALENDARIO ---
 def render_mes_html(df_plan, mes_objetivo):
@@ -190,7 +206,6 @@ def render_mes_html(df_plan, mes_objetivo):
     html += '</tbody></table>'
     return html
 
-
 # --- 7. MOTOR DE RESOLUCIÓN ---
 def resolver():
     model = cp_model.CpModel()
@@ -208,22 +223,13 @@ def resolver():
                 nom = df_staff.iloc[r]["Nombre"]
                 if rango_fechas[d] in st.session_state.ausencias_globales.get(nom, set()):
                     model.Add(vars[(r, d)] == 0)
-                
-                # Prohibido 2 días seguidos
                 if d < num_dias - 1: model.Add(vars[(r, d)] + vars[(r, d+1)] <= 1)
                 
-                # REGLA: Si hace Jueves (wd 3) -> Prohibido Sábado (d+2)
-                if rango_fechas[d].weekday() == 3:
-                    if d + 2 < num_dias:
-                        model.Add(vars[(r, d+2)] == 0).OnlyEnforceIf(vars[(r, d)])
-                
-                # REGLA: Si hace Sábado (wd 5) -> Prohibido Jueves siguiente (d+5)
-                if rango_fechas[d].weekday() == 5:
-                    if d + 5 < num_dias:
-                        model.Add(vars[(r, d+5)] == 0).OnlyEnforceIf(vars[(r, d)])
-
-                # Doblete Viernes -> Domingo
-                if rango_fechas[d].weekday() == 4:
+                if rango_fechas[d].weekday() == 3: # Jueves
+                    if d + 2 < num_dias: model.Add(vars[(r, d+2)] == 0).OnlyEnforceIf(vars[(r, d)])
+                if rango_fechas[d].weekday() == 5: # Sábado
+                    if d + 5 < num_dias: model.Add(vars[(r, d+5)] == 0).OnlyEnforceIf(vars[(r, d)])
+                if rango_fechas[d].weekday() == 4: # Viernes
                     if d + 2 < num_dias: model.Add(vars[(r, d)] <= vars[(r, d+2)])
 
         obj_list = []
@@ -268,7 +274,6 @@ def resolver():
             res_list.append({"Fecha": rango_fechas[d].strftime('%Y-%m-%d'), "Adjunto": a_nom, "Residente": r_nom})
         return pd.DataFrame(res_list)
     return None
-
 
 # --- 8. EJECUCIÓN ---
 st.divider()
