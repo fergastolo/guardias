@@ -31,16 +31,14 @@ db = iniciar_firestore()
 
 def cargar_ausencias_db():
     ausencias_dict = {}
-    if db is None:
-        return ausencias_dict
+    if db is None: return ausencias_dict
     try:
         docs = db.collection("ausencias").stream()
         for doc in docs:
             data = doc.to_dict()
             fechas_obj = {datetime.strptime(f, '%Y-%m-%d') for f in data.get("fechas", [])}
             ausencias_dict[doc.id] = fechas_obj
-    except:
-        pass
+    except: pass
     return ausencias_dict
 
 def guardar_ausencias_db(nombre, lista_fechas):
@@ -115,51 +113,53 @@ ultimo_dia = datetime(anio_sel, mes_fin, ultimo_dia_mes_val)
 rango_fechas = pd.date_range(primer_dia, ultimo_dia)
 
 
-# --- 5. NUEVA GESTIÓN DE AUSENCIAS (ESTILO GRILLA) ---
+# --- 5. GESTIÓN DE AUSENCIAS (CON ACCIONES EN BLOQUE) ---
 st.subheader("📅 Grilla de Ausencias (Días Rojos)")
-st.info("Marca con un ✅ los días que el residente **NO puede** hacer guardia.")
 
-# Crear estructura de la tabla de ausencias
+# --- ACCIONES RÁPIDAS (NUEVO) ---
+with st.expander("⚡ Acciones en Bloque (Marcar meses enteros)"):
+    col_res, col_btn1, col_btn2 = st.columns([2, 1, 1])
+    res_bulk = col_res.selectbox("Selecciona un residente:", df_residentes["Nombre"])
+    
+    if col_btn1.button(f"🔴 Marcar TODO para {res_bulk}"):
+        # Añadir todas las fechas del rango actual a la memoria
+        st.session_state.ausencias_globales[res_bulk] = st.session_state.ausencias_globales.get(res_bulk, set()).union(set(rango_fechas))
+        st.toast(f"Marcados todos los días para {res_bulk}")
+        st.rerun()
+
+    if col_btn2.button(f"⚪ Limpiar periodo para {res_bulk}"):
+        # Eliminar solo las fechas del rango seleccionado
+        st.session_state.ausencias_globales[res_bulk] = {d for d in st.session_state.ausencias_globales.get(res_bulk, set()) if not (primer_dia <= d <= ultimo_dia)}
+        st.toast(f"Limpiado el periodo para {res_bulk}")
+        st.rerun()
+
+# Construcción de la Grilla
 nombres_res = df_residentes["Nombre"].tolist()
-fechas_str = [d.strftime('%d/%m') for d in rango_fechas]
-
-# Construir DataFrame inicial de la grilla
 data_ausencias = {}
 for d in rango_fechas:
     col_name = d.strftime('%d/%m')
-    col_data = []
-    for nom in nombres_res:
-        # Si la fecha está en la base de datos, marcar como True
-        is_absent = d in st.session_state.ausencias_globales.get(nom, set())
-        col_data.append(is_absent)
-    data_ausencias[col_name] = col_data
+    data_ausencias[col_name] = [d in st.session_state.ausencias_globales.get(nom, set()) for nom in nombres_res]
 
 df_grid_ausencias = pd.DataFrame(data_ausencias, index=nombres_res)
 
-# Mostrar editor de tabla (Grilla)
 grid_editada = st.data_editor(
     df_grid_ausencias, 
     use_container_width=True,
-    column_config={col: st.column_config.CheckboxColumn(col) for col in fechas_str}
+    column_config={col: st.column_config.CheckboxColumn(col) for col in data_ausencias.keys()}
 )
 
-# Sincronizar cambios de la grilla a la memoria de sesión
-if st.button("☁️ Sincronizar y Guardar Ausencias"):
+if st.button("☁️ Sincronizar y Guardar en la Nube"):
     for nom in nombres_res:
-        # Extraer fechas marcadas como True para este residente
         row = grid_editada.loc[nom]
-        nuevas_ausencias = {rango_fechas[i] for i, val in enumerate(row) if val}
-        
-        # Mantener ausencias de otros meses fuera del rango actual
-        fuera_de_rango = {d for d in st.session_state.ausencias_globales.get(nom, set()) if not (primer_dia <= d <= ultimo_dia)}
-        st.session_state.ausencias_globales[nom] = nuevas_ausencias.union(fuera_de_rango)
+        nuevas = {rango_fechas[i] for i, val in enumerate(row) if val}
+        fuera = {d for d in st.session_state.ausencias_globales.get(nom, set()) if not (primer_dia <= d <= ultimo_dia)}
+        st.session_state.ausencias_globales[nom] = nuevas.union(fuera)
     
-    # Guardar en la nube
     with st.spinner("Guardando en Firestore..."):
         exito = True
         for nom, fechas in st.session_state.ausencias_globales.items():
             if not guardar_ausencias_db(nom, fechas): exito = False
-        if exito: st.success("✅ Ausencias sincronizadas con éxito.")
+        if exito: st.success("✅ Datos guardados permanentemente.")
 
 
 # --- 6. RENDERIZADO DEL CALENDARIO ---
@@ -205,12 +205,11 @@ def resolver():
             if rango_fechas[d] in st.session_state.ausencias_globales.get(nombre, set()):
                 model.Add(g[(r, d)] == 0)
             if d < num_dias - 1: model.Add(g[(r, d)] + g[(r, d+1)] <= 1)
-            if rango_fechas[d].weekday() == 3: # Jueves
+            if rango_fechas[d].weekday() == 3:
                 for dt in [1, 2, 3]:
                     if d + dt < num_dias: model.Add(g[(r, d+dt)] == 0).OnlyEnforceIf(g[(r, d)])
-            if rango_fechas[d].weekday() == 4: # Viernes
-                if d + 2 < num_dias: # Domingo
-                    model.Add(g[(r, d)] <= g[(r, d+2)])
+            if rango_fechas[d].weekday() == 4:
+                if d + 2 < num_dias: model.Add(g[(r, d)] <= g[(r, d+2)])
     
     objetivos = []
     meses_presentes = list(set(rango_fechas.month))
@@ -250,7 +249,7 @@ def resolver():
     return None
 
 
-# --- 8. EJECUCIÓN ---
+# --- 8. EJECUCIÓN Y TABLA ---
 st.divider()
 if st.button("🚀 Generar Planificación Final", type="primary"):
     with st.spinner("Optimizando cuadrante..."):
@@ -261,12 +260,13 @@ if st.button("🚀 Generar Planificación Final", type="primary"):
             dias_semana_str = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
             df_valid["Dia"] = df_valid["Fecha"].dt.weekday.map(lambda x: dias_semana_str[x])
             df_valid["Residente_R"] = df_valid["Residente"].apply(lambda x: f"{x} ({USER_R_MAP.get(x, '')})")
+            
             tabla = pd.crosstab(df_valid["Residente_R"], df_valid["Dia"])
             for d in dias_semana_str:
                 if d not in tabla.columns: tabla[d] = 0
             tabla = tabla[dias_semana_str]
-            orden_plantilla = [f"{row['Nombre']} ({row['R']})" for _, row in df_residentes.iterrows()]
-            tabla = tabla.reindex(orden_plantilla, fill_value=0)
+            orden = [f"{row['Nombre']} ({row['R']})" for _, row in df_residentes.iterrows()]
+            tabla = tabla.reindex(orden, fill_value=0)
             tabla["Total Guardias"] = tabla.sum(axis=1)
             tabla.loc["Total Cobertura"] = tabla.sum(axis=0)
             
@@ -286,7 +286,7 @@ if st.button("🚀 Generar Planificación Final", type="primary"):
             }
         else:
             st.session_state.plan_generado = None
-            st.error("❌ Sin solución matemática. Prueba a flexibilizar reglas.")
+            st.error("❌ Sin solución matemática.")
 
 if st.session_state.plan_generado:
     datos = st.session_state.plan_generado
