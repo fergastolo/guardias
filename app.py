@@ -32,17 +32,15 @@ db = iniciar_firestore()
 def cargar_ausencias_db():
     ausencias_dict = {}
     if db is None:
-        st.warning("⚠️ Sin conexión a Base de Datos. Usando memoria temporal.")
         return ausencias_dict
-        
     try:
         docs = db.collection("ausencias").stream()
         for doc in docs:
             data = doc.to_dict()
             fechas_obj = {datetime.strptime(f, '%Y-%m-%d') for f in data.get("fechas", [])}
             ausencias_dict[doc.id] = fechas_obj
-    except Exception as e:
-        st.error(f"Error al leer la colección 'ausencias': {e}")
+    except:
+        pass
     return ausencias_dict
 
 def guardar_ausencias_db(nombre, lista_fechas):
@@ -56,12 +54,11 @@ def guardar_ausencias_db(nombre, lista_fechas):
 if 'ausencias_globales' not in st.session_state:
     st.session_state.ausencias_globales = cargar_ausencias_db()
 
-# Inicializar la memoria para el cuadrante generado
 if 'plan_generado' not in st.session_state:
     st.session_state.plan_generado = None
 
 
-# --- 3. ESTILOS CSS BASE ---
+# --- 3. ESTILOS CSS ---
 estilos_css = """
 <style>
     body { font-family: sans-serif; }
@@ -74,8 +71,6 @@ estilos_css = """
         text-align: center; margin-top: 8px; color: #1a1a1a; border: 1px solid rgba(0,0,0,0.1);
     }
     .mes-titulo { color: #2c3e50; margin-top: 20px; border-bottom: 2px solid #eee; padding-bottom: 10px; }
-    
-    /* Nuevo estilo para la tabla de resumen al descargar en HTML */
     .summary-table { width: 100%; border-collapse: collapse; margin-top: 20px; margin-bottom: 40px; font-size: 0.95em; }
     .summary-table th { background-color: #e9ecef; padding: 12px; border: 1px solid #dee2e6; text-align: center; font-weight: bold; color: #333;}
     .summary-table td { padding: 10px; border: 1px solid #dee2e6; text-align: center; color: #111; }
@@ -84,7 +79,7 @@ estilos_css = """
 """
 st.markdown(estilos_css, unsafe_allow_html=True)
 
-st.title("🏥 Planificador de Guardias Nefrología")
+st.title("🏥 Planificador de Guardias")
 
 # --- 4. CONFIGURACIÓN DE PLANTILLA ---
 st.sidebar.header("1. Plantilla de Residentes")
@@ -114,47 +109,60 @@ if mes_fin < mes_ini:
     st.sidebar.error("El Mes Fin debe ser igual o posterior al Mes Inicio.")
     st.stop()
 
-# Generar rango de fechas global
 primer_dia = datetime(anio_sel, mes_ini, 1)
-ultimo_dia_mes = calendar.monthrange(anio_sel, mes_fin)[1]
-ultimo_dia = datetime(anio_sel, mes_fin, ultimo_dia_mes)
+ultimo_dia_mes_val = calendar.monthrange(anio_sel, mes_fin)[1]
+ultimo_dia = datetime(anio_sel, mes_fin, ultimo_dia_mes_val)
 rango_fechas = pd.date_range(primer_dia, ultimo_dia)
 
 
-# --- 5. GESTIÓN DE AUSENCIAS ---
-st.subheader("📅 Registro de Ausencias (Rojos)")
+# --- 5. NUEVA GESTIÓN DE AUSENCIAS (ESTILO GRILLA) ---
+st.subheader("📅 Grilla de Ausencias (Días Rojos)")
+st.info("Marca con un ✅ los días que el residente **NO puede** hacer guardia.")
 
-tabs = st.tabs([row["Nombre"] for _, row in df_residentes.iterrows()])
+# Crear estructura de la tabla de ausencias
+nombres_res = df_residentes["Nombre"].tolist()
+fechas_str = [d.strftime('%d/%m') for d in rango_fechas]
 
-for i, (idx, row) in enumerate(df_residentes.iterrows()):
-    nombre = row["Nombre"]
-    with tabs[i]:
-        if nombre not in st.session_state.ausencias_globales:
-            st.session_state.ausencias_globales[nombre] = set()
-        
-        actuales = [d for d in st.session_state.ausencias_globales[nombre] if primer_dia <= d <= ultimo_dia]
-        
-        seleccion = st.multiselect(
-            f"Selecciona días rojos para {nombre} (Entre {mes_nombres[mes_ini-1]} y {mes_nombres[mes_fin-1]}):", 
-            rango_fechas, 
-            default=actuales, 
-            format_func=lambda x: f"{x.day} {mes_nombres[x.month-1]}", 
-            key=f"m_{nombre}_{mes_ini}_{mes_fin}"
-        )
-        
-        st.session_state.ausencias_globales[nombre] = {d for d in st.session_state.ausencias_globales[nombre] if not (primer_dia <= d <= ultimo_dia)}
-        for d in seleccion:
-            st.session_state.ausencias_globales[nombre].add(d)
+# Construir DataFrame inicial de la grilla
+data_ausencias = {}
+for d in rango_fechas:
+    col_name = d.strftime('%d/%m')
+    col_data = []
+    for nom in nombres_res:
+        # Si la fecha está en la base de datos, marcar como True
+        is_absent = d in st.session_state.ausencias_globales.get(nom, set())
+        col_data.append(is_absent)
+    data_ausencias[col_name] = col_data
 
-if st.button("☁️ Sincronizar / Guardar en la Nube"):
+df_grid_ausencias = pd.DataFrame(data_ausencias, index=nombres_res)
+
+# Mostrar editor de tabla (Grilla)
+grid_editada = st.data_editor(
+    df_grid_ausencias, 
+    use_container_width=True,
+    column_config={col: st.column_config.CheckboxColumn(col) for col in fechas_str}
+)
+
+# Sincronizar cambios de la grilla a la memoria de sesión
+if st.button("☁️ Sincronizar y Guardar Ausencias"):
+    for nom in nombres_res:
+        # Extraer fechas marcadas como True para este residente
+        row = grid_editada.loc[nom]
+        nuevas_ausencias = {rango_fechas[i] for i, val in enumerate(row) if val}
+        
+        # Mantener ausencias de otros meses fuera del rango actual
+        fuera_de_rango = {d for d in st.session_state.ausencias_globales.get(nom, set()) if not (primer_dia <= d <= ultimo_dia)}
+        st.session_state.ausencias_globales[nom] = nuevas_ausencias.union(fuera_de_rango)
+    
+    # Guardar en la nube
     with st.spinner("Guardando en Firestore..."):
         exito = True
-        for nombre, fechas in st.session_state.ausencias_globales.items():
-            if not guardar_ausencias_db(nombre, fechas): exito = False
-        if exito: st.success("✅ ¡Datos guardados permanentemente!")
+        for nom, fechas in st.session_state.ausencias_globales.items():
+            if not guardar_ausencias_db(nom, fechas): exito = False
+        if exito: st.success("✅ Ausencias sincronizadas con éxito.")
 
 
-# --- 6. RENDERIZADO DEL CALENDARIO POR MES ---
+# --- 6. RENDERIZADO DEL CALENDARIO ---
 def render_mes_html(df_plan, mes_objetivo):
     plan_dict = {row['Fecha']: row['Residente'] for _, row in df_plan.iterrows()}
     cal = calendar.Calendar(firstweekday=0)
@@ -181,7 +189,7 @@ def render_mes_html(df_plan, mes_objetivo):
     return html
 
 
-# --- 7. MOTOR DE RESOLUCIÓN MULTI-MES ---
+# --- 7. MOTOR DE RESOLUCIÓN ---
 def resolver():
     model = cp_model.CpModel()
     num_res, num_dias = len(df_residentes), len(rango_fechas)
@@ -191,71 +199,40 @@ def resolver():
         for d in range(num_dias): g[(r, d)] = model.NewBoolVar(f'r{r}d{d}')
     
     for d in range(num_dias):
-        # Máximo 1 residente por día
         model.Add(sum(g[(r, d)] for r in range(num_res)) <= 1)
-        
         for r in range(num_res):
             nombre = df_residentes.iloc[r]["Nombre"]
-            
-            # Ausencias programadas
             if rango_fechas[d] in st.session_state.ausencias_globales.get(nombre, set()):
                 model.Add(g[(r, d)] == 0)
-                
-            # Regla 48h estricta
             if d < num_dias - 1: model.Add(g[(r, d)] + g[(r, d+1)] <= 1)
-            
-            # --- REGLA ESTRICTA 1: Jueves -> Libra Vie/Sab/Dom ---
             if rango_fechas[d].weekday() == 3: # Jueves
                 for dt in [1, 2, 3]:
                     if d + dt < num_dias: model.Add(g[(r, d+dt)] == 0).OnlyEnforceIf(g[(r, d)])
-                    
-            # --- REGLA ESTRICTA 2: Si hace Viernes, HACE el Domingo (pero el Viernes puede quedar vacío) ---
             if rango_fechas[d].weekday() == 4: # Viernes
                 if d + 2 < num_dias: # Domingo
                     model.Add(g[(r, d)] <= g[(r, d+2)])
     
     objetivos = []
-    
     meses_presentes = list(set(rango_fechas.month))
     for mes in meses_presentes:
         indices_del_mes = [d for d in range(num_dias) if rango_fechas[d].month == mes]
-        idx_findes = [d for d in indices_del_mes if rango_fechas[d].weekday() in [5, 6]] # Sábados y Domingos
-        
+        idx_findes = [d for d in indices_del_mes if rango_fechas[d].weekday() in [5, 6]]
         for r in range(num_res):
             tope_mensual = df_residentes.iloc[r]["Tope"]
-            
-            # Control del Tope general
             model.Add(sum(g[(r, d)] for d in indices_del_mes) <= tope_mensual)
-            
-            # --- REGLA EQUIDAD FINES DE SEMANA ---
-            if tope_mensual >= 6:
-                max_findes = 2
-            elif tope_mensual >= 4:
-                max_findes = 2
-            else:
-                max_findes = 1
+            max_findes = 2 if tope_mensual >= 4 else 1
             model.Add(sum(g[(r, d)] for d in idx_findes) <= max_findes)
-            
-            # Control para no repetir el mismo día > 2 veces
             for wd in range(7): 
                 idx_wd_mes = [d for d in indices_del_mes if rango_fechas[d].weekday() == wd]
                 suma_dias = sum(g[(r, d)] for d in idx_wd_mes)
-                
-                model.Add(suma_dias <= 2) # Hard limit
-                
-                # Multa por equidad
+                model.Add(suma_dias <= 2)
                 hace_dos = model.NewBoolVar(f'r{r}_m{mes}_wd{wd}_hace_dos')
                 model.Add(suma_dias <= 1 + hace_dos)
                 objetivos.append(hace_dos * -50000)
 
     for d in range(num_dias):
         wd = rango_fechas[d].weekday()
-        # Pesos anti-vacíos base
-        if wd == 4: peso_base = 100000      # Viernes (Pierde menos si se queda vacío)
-        elif wd == 1: peso_base = 101000    # Martes
-        elif wd == 2: peso_base = 102000    # Miércoles
-        else: peso_base = 110000            # Resto
-        
+        peso_base = 100000 if wd == 4 else (101000 if wd == 1 else (102000 if wd == 2 else 110000))
         for r in range(num_res): 
             peso_final = peso_base + random.randint(1, 999) 
             objetivos.append(g[(r, d)] * peso_final)
@@ -273,98 +250,51 @@ def resolver():
     return None
 
 
-# --- 8. EJECUCIÓN Y TABLA DE ESTADÍSTICAS ---
+# --- 8. EJECUCIÓN ---
 st.divider()
-
-# Botón para generar y guardar en la memoria de sesión
 if st.button("🚀 Generar Planificación Final", type="primary"):
-    with st.spinner(f"Optimizando de forma equitativa desde {mes_nombres[mes_ini-1]} hasta {mes_nombres[mes_fin-1]}..."):
+    with st.spinner("Optimizando cuadrante..."):
         df_f = resolver()
         if df_f is not None:
-            # 1. Preparar datos para tabla resumen y CSV
             df_valid = df_f[df_f["Residente"] != "VACÍO"].copy()
             df_valid["Fecha"] = pd.to_datetime(df_valid["Fecha"])
             dias_semana_str = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
             df_valid["Dia"] = df_valid["Fecha"].dt.weekday.map(lambda x: dias_semana_str[x])
             df_valid["Residente_R"] = df_valid["Residente"].apply(lambda x: f"{x} ({USER_R_MAP.get(x, '')})")
-            
-            # Crear la tabla pivote cruzada
             tabla = pd.crosstab(df_valid["Residente_R"], df_valid["Dia"])
             for d in dias_semana_str:
                 if d not in tabla.columns: tabla[d] = 0
             tabla = tabla[dias_semana_str]
-            tabla.index.name = "Residente"
-            
-            # ORDENAR LA TABLA SEGÚN LA PLANTILLA LATERAL
             orden_plantilla = [f"{row['Nombre']} ({row['R']})" for _, row in df_residentes.iterrows()]
             tabla = tabla.reindex(orden_plantilla, fill_value=0)
-            
-            # Calcular totales después de ordenar
             tabla["Total Guardias"] = tabla.sum(axis=1)
             tabla.loc["Total Cobertura"] = tabla.sum(axis=0)
             
-            # Generar el CSV de los datos puros
-            df_csv = df_valid[["Fecha", "Dia", "Residente_R"]].copy()
-            df_csv["Fecha"] = df_csv["Fecha"].dt.strftime('%Y-%m-%d')
-            csv_data = df_csv.to_csv(index=False).encode('utf-8')
-            
-            # 2. Preparar el archivo HTML para descarga (incluyendo calendarios y tabla)
             html_descarga = f"<html><head><meta charset='utf-8'>{estilos_css}</head><body>"
-            html_descarga += "<h1>🏥 Planificación de Guardias - Nefrología</h1>"
+            html_descarga += "<h1>🏥 Planificación de Guardias</h1>"
             meses_a_pintar = range(mes_ini, mes_fin + 1)
-            
-            for m in meses_a_pintar:
-                html_descarga += render_mes_html(df_f, m)
-                
-            # Insertamos la tabla resumen al final del HTML generado
-            html_descarga += "<hr><h2 class='mes-titulo'>📊 Resumen de Guardias y Cobertura</h2>"
+            for m in meses_a_pintar: html_descarga += render_mes_html(df_f, m)
+            html_descarga += "<hr><h2>📊 Resumen de Guardias y Cobertura</h2>"
             html_descarga += tabla.to_html(classes="summary-table", border=0, justify="center")
             html_descarga += "</body></html>"
             
-            # 3. Guardamos TODOS los datos calculados en la memoria de sesión
+            df_csv = df_valid[["Fecha", "Dia", "Residente_R"]].copy()
+            csv_data = df_csv.to_csv(index=False).encode('utf-8')
+            
             st.session_state.plan_generado = {
-                "df_f": df_f,
-                "html": html_descarga,
-                "tabla": tabla,
-                "csv": csv_data,
-                "meses_a_pintar": meses_a_pintar
+                "df_f": df_f, "html": html_descarga, "tabla": tabla, "csv": csv_data, "meses": meses_a_pintar
             }
         else:
             st.session_state.plan_generado = None
-            st.error("❌ No hay solución matemática posible. Prueba a flexibilizar ausencias o topes de guardia.")
+            st.error("❌ Sin solución matemática. Prueba a flexibilizar reglas.")
 
-
-# Mostrar los resultados si están en la memoria (incluso después de pulsar descargar)
-if st.session_state.plan_generado is not None:
+if st.session_state.plan_generado:
     datos = st.session_state.plan_generado
-    
-    # 1. Pintar los calendarios en la web
-    for m in datos["meses_a_pintar"]:
-        st.write(render_mes_html(datos["df_f"], m), unsafe_allow_html=True)
-    
-    # 2. Pintar la tabla de resumen en la web
+    for m in datos["meses"]: st.write(render_mes_html(datos["df_f"], m), unsafe_allow_html=True)
     st.divider()
     st.subheader("📊 Resumen de Guardias y Cobertura")
     st.dataframe(datos["tabla"].style.format(precision=0), use_container_width=True)
-    
-    # 3. Mostrar Botones de Descarga
     st.divider()
-    st.subheader("📥 Exportar Planificación")
     col1, col2 = st.columns(2)
-    
-    nombre_archivo_html = f"Guardias_{mes_nombres[mes_ini-1]}_{mes_nombres[mes_fin-1]}_{anio_sel}.html"
-    col1.download_button(
-        label="🎨 Descargar Calendario Visual (Imprimible)",
-        data=datos["html"],
-        file_name=nombre_archivo_html,
-        mime="text/html",
-        type="primary"
-    )
-    
-    nombre_archivo_csv = f"Datos_Guardias_{mes_nombres[mes_ini-1]}_{mes_nombres[mes_fin-1]}_{anio_sel}.csv"
-    col2.download_button(
-        label="📊 Descargar Datos en Formato Excel (CSV)",
-        data=datos["csv"],
-        file_name=nombre_archivo_csv,
-        mime="text/csv"
-    )
+    col1.download_button("🎨 Descargar Calendario Visual (HTML)", datos["html"], f"Plan_{mes_ini}_{mes_fin}.html", "text/html", type="primary")
+    col2.download_button("📊 Descargar Datos (CSV)", datos["csv"], f"Datos_{mes_ini}_{mes_fin}.csv", "text/csv")
