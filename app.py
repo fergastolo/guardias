@@ -12,7 +12,7 @@ import random
 # --- 1. CONFIGURACIÓN DE LA PÁGINA ---
 st.set_page_config(page_title="Planificador de Guardias", layout="wide")
 
-# --- 2. CONEXIÓN A FIRESTORE ---
+# --- 2. CONEXIÓN A FIRESTORE (MÉTODO BASE64) ---
 @st.cache_resource
 def iniciar_firestore():
     try:
@@ -72,7 +72,7 @@ estilos_css = """
     .summary-table { width: 100%; border-collapse: collapse; margin-top: 20px; margin-bottom: 40px; font-size: 0.95em; }
     .summary-table th { background-color: #e9ecef; padding: 12px; border: 1px solid #dee2e6; text-align: center; font-weight: bold; color: #333;}
     .summary-table td { padding: 10px; border: 1px solid #dee2e6; text-align: center; color: #111; }
-    .summary-table tbody tr:last-child { font-weight: bold; background-color: #f8f9fa; }
+    .summary-table tr.total-row { font-weight: bold; background-color: #f8f9fa; }
 </style>
 """
 st.markdown(estilos_css, unsafe_allow_html=True)
@@ -113,53 +113,38 @@ ultimo_dia = datetime(anio_sel, mes_fin, ultimo_dia_mes_val)
 rango_fechas = pd.date_range(primer_dia, ultimo_dia)
 
 
-# --- 5. GESTIÓN DE AUSENCIAS (CON ACCIONES EN BLOQUE) ---
-st.subheader("📅 Grilla de Ausencias (Días Rojos)")
+# --- 5. GESTIÓN DE AUSENCIAS (SISTEMA DE PESTAÑAS) ---
+st.subheader("📅 Registro de Ausencias (Rojos)")
 
-# --- ACCIONES RÁPIDAS (NUEVO) ---
-with st.expander("⚡ Acciones en Bloque (Marcar meses enteros)"):
-    col_res, col_btn1, col_btn2 = st.columns([2, 1, 1])
-    res_bulk = col_res.selectbox("Selecciona un residente:", df_residentes["Nombre"])
-    
-    if col_btn1.button(f"🔴 Marcar TODO para {res_bulk}"):
-        # Añadir todas las fechas del rango actual a la memoria
-        st.session_state.ausencias_globales[res_bulk] = st.session_state.ausencias_globales.get(res_bulk, set()).union(set(rango_fechas))
-        st.toast(f"Marcados todos los días para {res_bulk}")
-        st.rerun()
+tabs = st.tabs([row["Nombre"] for _, row in df_residentes.iterrows()])
 
-    if col_btn2.button(f"⚪ Limpiar periodo para {res_bulk}"):
-        # Eliminar solo las fechas del rango seleccionado
-        st.session_state.ausencias_globales[res_bulk] = {d for d in st.session_state.ausencias_globales.get(res_bulk, set()) if not (primer_dia <= d <= ultimo_dia)}
-        st.toast(f"Limpiado el periodo para {res_bulk}")
-        st.rerun()
-
-# Construcción de la Grilla
-nombres_res = df_residentes["Nombre"].tolist()
-data_ausencias = {}
-for d in rango_fechas:
-    col_name = d.strftime('%d/%m')
-    data_ausencias[col_name] = [d in st.session_state.ausencias_globales.get(nom, set()) for nom in nombres_res]
-
-df_grid_ausencias = pd.DataFrame(data_ausencias, index=nombres_res)
-
-grid_editada = st.data_editor(
-    df_grid_ausencias, 
-    use_container_width=True,
-    column_config={col: st.column_config.CheckboxColumn(col) for col in data_ausencias.keys()}
-)
+for i, (idx, row) in enumerate(df_residentes.iterrows()):
+    nombre = row["Nombre"]
+    with tabs[i]:
+        if nombre not in st.session_state.ausencias_globales:
+            st.session_state.ausencias_globales[nombre] = set()
+        
+        actuales = [d for d in st.session_state.ausencias_globales[nombre] if primer_dia <= d <= ultimo_dia]
+        
+        seleccion = st.multiselect(
+            f"Selecciona días rojos para {nombre}:", 
+            rango_fechas, 
+            default=actuales, 
+            format_func=lambda x: f"{x.day} {mes_nombres[x.month-1]}", 
+            key=f"m_{nombre}_{mes_ini}_{mes_fin}"
+        )
+        
+        # Sincronizar memoria
+        st.session_state.ausencias_globales[nombre] = {d for d in st.session_state.ausencias_globales[nombre] if not (primer_dia <= d <= ultimo_dia)}
+        for d in seleccion:
+            st.session_state.ausencias_globales[nombre].add(d)
 
 if st.button("☁️ Sincronizar y Guardar en la Nube"):
-    for nom in nombres_res:
-        row = grid_editada.loc[nom]
-        nuevas = {rango_fechas[i] for i, val in enumerate(row) if val}
-        fuera = {d for d in st.session_state.ausencias_globales.get(nom, set()) if not (primer_dia <= d <= ultimo_dia)}
-        st.session_state.ausencias_globales[nom] = nuevas.union(fuera)
-    
     with st.spinner("Guardando en Firestore..."):
         exito = True
         for nom, fechas in st.session_state.ausencias_globales.items():
             if not guardar_ausencias_db(nom, fechas): exito = False
-        if exito: st.success("✅ Datos guardados permanentemente.")
+        if exito: st.success("✅ Datos guardados con éxito.")
 
 
 # --- 6. RENDERIZADO DEL CALENDARIO ---
@@ -205,11 +190,12 @@ def resolver():
             if rango_fechas[d] in st.session_state.ausencias_globales.get(nombre, set()):
                 model.Add(g[(r, d)] == 0)
             if d < num_dias - 1: model.Add(g[(r, d)] + g[(r, d+1)] <= 1)
-            if rango_fechas[d].weekday() == 3:
+            if rango_fechas[d].weekday() == 3: # Jueves
                 for dt in [1, 2, 3]:
                     if d + dt < num_dias: model.Add(g[(r, d+dt)] == 0).OnlyEnforceIf(g[(r, d)])
-            if rango_fechas[d].weekday() == 4:
-                if d + 2 < num_dias: model.Add(g[(r, d)] <= g[(r, d+2)])
+            if rango_fechas[d].weekday() == 4: # Viernes
+                if d + 2 < num_dias: # Domingo
+                    model.Add(g[(r, d)] <= g[(r, d+2)])
     
     objetivos = []
     meses_presentes = list(set(rango_fechas.month))
@@ -249,40 +235,57 @@ def resolver():
     return None
 
 
-# --- 8. EJECUCIÓN Y TABLA ---
+# --- 8. EJECUCIÓN ---
 st.divider()
 if st.button("🚀 Generar Planificación Final", type="primary"):
     with st.spinner("Optimizando cuadrante..."):
         df_f = resolver()
         if df_f is not None:
+            # 1. Tabla Resumen Guardias
             df_valid = df_f[df_f["Residente"] != "VACÍO"].copy()
             df_valid["Fecha"] = pd.to_datetime(df_valid["Fecha"])
             dias_semana_str = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
             df_valid["Dia"] = df_valid["Fecha"].dt.weekday.map(lambda x: dias_semana_str[x])
             df_valid["Residente_R"] = df_valid["Residente"].apply(lambda x: f"{x} ({USER_R_MAP.get(x, '')})")
             
-            tabla = pd.crosstab(df_valid["Residente_R"], df_valid["Dia"])
+            tabla_g = pd.crosstab(df_valid["Residente_R"], df_valid["Dia"])
             for d in dias_semana_str:
-                if d not in tabla.columns: tabla[d] = 0
-            tabla = tabla[dias_semana_str]
+                if d not in tabla_g.columns: tabla_g[d] = 0
+            tabla_g = tabla_g[dias_semana_str]
             orden = [f"{row['Nombre']} ({row['R']})" for _, row in df_residentes.iterrows()]
-            tabla = tabla.reindex(orden, fill_value=0)
-            tabla["Total Guardias"] = tabla.sum(axis=1)
-            tabla.loc["Total Cobertura"] = tabla.sum(axis=0)
+            tabla_g = tabla_g.reindex(orden, fill_value=0)
+            tabla_g["Total Guardias"] = tabla_g.sum(axis=1)
+            tabla_g.loc["Total Cobertura"] = tabla_g.sum(axis=0)
             
+            # 2. Tabla Resumen Vacaciones (Días de semana laborables únicamente)
+            vacaciones_data = []
+            for _, row in df_residentes.iterrows():
+                nom = row["Nombre"]
+                r_tag = row["R"]
+                # Contar días rojos entre semana (Mon-Fri) en el periodo seleccionado
+                rojos = st.session_state.ausencias_globales.get(nom, set())
+                count = sum(1 for d in rojos if primer_dia <= d <= ultimo_dia and d.weekday() < 5)
+                vacaciones_data.append({"Residente": f"{nom} ({r_tag})", "Días Vacaciones (Lun-Vie)": count})
+            
+            df_vac = pd.DataFrame(vacaciones_data).set_index("Residente")
+            
+            # 3. HTML para descarga
             html_descarga = f"<html><head><meta charset='utf-8'>{estilos_css}</head><body>"
             html_descarga += "<h1>🏥 Planificación de Guardias</h1>"
             meses_a_pintar = range(mes_ini, mes_fin + 1)
             for m in meses_a_pintar: html_descarga += render_mes_html(df_f, m)
+            
             html_descarga += "<hr><h2>📊 Resumen de Guardias y Cobertura</h2>"
-            html_descarga += tabla.to_html(classes="summary-table", border=0, justify="center")
+            html_descarga += tabla_g.to_html(classes="summary-table", border=0, justify="center")
+            
+            html_descarga += "<h2>🏖️ Resumen de Vacaciones (Días Laborables)</h2>"
+            html_descarga += df_vac.to_html(classes="summary-table", border=0, justify="center")
             html_descarga += "</body></html>"
             
-            df_csv = df_valid[["Fecha", "Dia", "Residente_R"]].copy()
-            csv_data = df_csv.to_csv(index=False).encode('utf-8')
+            csv_data = df_valid[["Fecha", "Dia", "Residente_R"]].to_csv(index=False).encode('utf-8')
             
             st.session_state.plan_generado = {
-                "df_f": df_f, "html": html_descarga, "tabla": tabla, "csv": csv_data, "meses": meses_a_pintar
+                "df_f": df_f, "html": html_descarga, "tabla_g": tabla_g, "tabla_v": df_vac, "csv": csv_data, "meses": meses_a_pintar
             }
         else:
             st.session_state.plan_generado = None
@@ -291,10 +294,15 @@ if st.button("🚀 Generar Planificación Final", type="primary"):
 if st.session_state.plan_generado:
     datos = st.session_state.plan_generado
     for m in datos["meses"]: st.write(render_mes_html(datos["df_f"], m), unsafe_allow_html=True)
+    
     st.divider()
     st.subheader("📊 Resumen de Guardias y Cobertura")
-    st.dataframe(datos["tabla"].style.format(precision=0), use_container_width=True)
+    st.dataframe(datos["tabla_g"].style.format(precision=0), use_container_width=True)
+    
+    st.subheader("🏖️ Resumen de Vacaciones (Días Laborables registrados)")
+    st.dataframe(datos["tabla_v"].style.format(precision=0), use_container_width=True)
+    
     st.divider()
     col1, col2 = st.columns(2)
-    col1.download_button("🎨 Descargar Calendario Visual (HTML)", datos["html"], f"Plan_{mes_ini}_{mes_fin}.html", "text/html", type="primary")
-    col2.download_button("📊 Descargar Datos (CSV)", datos["csv"], f"Datos_{mes_ini}_{mes_fin}.csv", "text/csv")
+    col1.download_button("🎨 Descargar Planificación Visual (HTML)", datos["html"], "Plan_Guardias.html", "text/html", type="primary")
+    col2.download_button("📊 Descargar Datos (CSV)", datos["csv"], "Datos_Guardias.csv", "text/csv")
