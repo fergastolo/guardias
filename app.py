@@ -153,9 +153,12 @@ def resolver():
             else: model.Add(sum(v[(r, d)] for r in range(n)) <= 1)
             for r in range(n):
                 nom = staff.iloc[r]["Nombre"]
-                if d in st.session_state.ausencias_globales.get(nom, set()): model.Add(v[(r, d)] == 0)
+                
+                # ¡CORRECCIÓN AQUÍ! Ahora busca la fecha real (rango_fechas[d]), no el índice (d)
+                if rango_fechas[d] in st.session_state.ausencias_globales.get(nom, set()): 
+                    model.Add(v[(r, d)] == 0)
+                
                 if d < num_dias - 1: model.Add(v[(r, d)] + v[(r, d+1)] <= 1)
-                # Sábado-Jueves
                 if rango_fechas[d].weekday() == 5 and d + 5 < num_dias: model.Add(v[(r, d+5)] == 0).OnlyEnforceIf(v[(r, d)])
                 if rango_fechas[d].weekday() == 3 and d + 2 < num_dias: model.Add(v[(r, d+2)] == 0).OnlyEnforceIf(v[(r, d)])
                 if not es_adj and rango_fechas[d].weekday() == 4 and d + 2 < num_dias: model.Add(v[(r, d)] <= v[(r, d+2)])
@@ -167,28 +170,25 @@ def resolver():
         for wd in dias_criticos:
             total_dias_periodo = sum(1 for d in range(num_dias) if rango_fechas[d].weekday() == wd)
             
-            # Calculamos disponibilidad total del grupo para ese día de la semana
             disponibilidad_total_grupo = 0
             disp_por_persona = []
             for r in range(n):
                 nom = staff.iloc[r]["Nombre"]
-                dias_libres = sum(1 for d in range(num_dias) if rango_fechas[d].weekday() == wd and d not in st.session_state.ausencias_globales.get(nom, set()))
+                # ¡CORRECCIÓN AQUÍ! Busca la fecha real para calcular la disponibilidad
+                dias_libres = sum(1 for d in range(num_dias) if rango_fechas[d].weekday() == wd and rango_fechas[d] not in st.session_state.ausencias_globales.get(nom, set()))
                 disp_por_persona.append(dias_libres)
                 disponibilidad_total_grupo += dias_libres
             
             # Reparto Proporcional
             for r in range(n):
                 if disponibilidad_total_grupo > 0:
-                    # El objetivo es: (Mis días disponibles / Disponibilidad total) * Total de días a cubrir
                     objetivo_proporcional = (disp_por_persona[r] / disponibilidad_total_grupo) * total_dias_periodo
                     count_wd = sum(v[(r, d)] for d in range(num_dias) if rango_fechas[d].weekday() == wd)
                     
-                    # Penalización por desviarse del objetivo proporcional (Soft constraint)
-                    # Usamos una variable auxiliar para la diferencia absoluta
                     diff = model.NewIntVar(0, total_dias_periodo, f'diff_{prefix}_{r}_{wd}')
                     model.Add(count_wd - int(objetivo_proporcional + 0.5) <= diff)
                     model.Add(int(objetivo_proporcional + 0.5) - count_wd <= diff)
-                    objs.append(diff * -100000) # Penalización alta por desbalance proporcional
+                    objs.append(diff * -100000)
 
         # 3. Topes mensuales (Hard constraint)
         for m in list(set(rango_fechas.month)):
@@ -196,7 +196,6 @@ def resolver():
             for r in range(n):
                 model.Add(sum(v[(r, d)] for d in idx_m) <= staff.iloc[r]["Tope"])
 
-        # Variedad aleatoria
         for d in range(num_dias):
             for r in range(n): objs.append(v[(r, d)] * random.randint(1, 50))
             
@@ -207,7 +206,7 @@ def resolver():
     
     model.Maximize(sum(o_adj) + sum(o_res))
     solver = cp_model.CpSolver()
-    solver.parameters.max_time_in_seconds = 10.0 # Tiempo límite para buscar la mejor solución
+    solver.parameters.max_time_in_seconds = 10.0
     
     if solver.Solve(model) in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
         res = []
@@ -277,3 +276,4 @@ if st.session_state.plan_generado:
     st.dataframe(d["t_adj"].style.format(precision=0), use_container_width=True)
     st.subheader("🎓 Resumen Residentes")
     st.dataframe(d["t_res"].style.format(precision=0), use_container_width=True)
+    st.download_button("🎨 Descargar HTML", d["html"], "Plan_Equitativo.html", "text/html", type="primary")
