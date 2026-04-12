@@ -72,6 +72,7 @@ estilos_css = """
     .summary-table { width: 100%; border-collapse: collapse; margin-top: 20px; margin-bottom: 40px; font-size: 0.95em; }
     .summary-table th { background-color: #e9ecef; padding: 12px; border: 1px solid #dee2e6; text-align: center; font-weight: bold; color: #333;}
     .summary-table td { padding: 10px; border: 1px solid #dee2e6; text-align: center; color: #111; }
+    .summary-table tr:last-child { font-weight: bold; background-color: #f8f9fa; }
 </style>
 """
 st.markdown(estilos_css, unsafe_allow_html=True)
@@ -259,12 +260,13 @@ if st.button("🚀 Generar Planificación Final", type="primary"):
                 nom = row["Nombre"]
                 r_tag = row["R"]
                 rojos = st.session_state.ausencias_globales.get(nom, set())
-                # Contar solo días laborables (Lun-Vie) dentro del periodo
                 count = sum(1 for d in rojos if primer_dia <= d <= ultimo_dia and d.weekday() < 5)
                 vac_data.append({"Residente": f"{nom} ({r_tag})", "Días Vacaciones (Lun-Vie)": count})
             df_vac = pd.DataFrame(vac_data).set_index("Residente")
             
-            # 3. HTML para descarga
+            # 3. CSV y HTML
+            csv_string = df_valid[["Fecha", "Dia", "Residente_R"]].to_csv(index=False).encode('utf-8')
+            
             html_descarga = f"<html><head><meta charset='utf-8'>{estilos_css}</head><body>"
             html_descarga += "<h1>🏥 Planificación de Guardias</h1>"
             meses_a_pintar = range(mes_ini, mes_fin + 1)
@@ -275,10 +277,14 @@ if st.button("🚀 Generar Planificación Final", type="primary"):
             html_descarga += df_vac.to_html(classes="summary-table", border=0, justify="center")
             html_descarga += "</body></html>"
             
-            df_csv = df_valid[["Fecha", "Dia", "Residente_R"]].to_csv(index=False).encode('utf-8')
-            
+            # Guardar en memoria de sesión (Corregido el nombre de variable csv_data)
             st.session_state.plan_generado = {
-                "df_f": df_f, "html": html_descarga, "tabla_g": tabla_g, "tabla_v": df_vac, "csv": csv_data, "meses": meses_a_pintar
+                "df_f": df_f, 
+                "html": html_descarga, 
+                "tabla_g": tabla_g, 
+                "tabla_v": df_vac, 
+                "csv": csv_string, 
+                "meses": meses_a_pintar
             }
         else:
             st.session_state.plan_generado = None
