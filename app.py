@@ -30,7 +30,7 @@ db = iniciar_firestore()
 
 # --- FUNCIONES DE APOYO ---
 def get_contrast_color(hex_color):
-    hex_color = hex_color.lstrip('#')
+    hex_color = str(hex_color).lstrip('#')
     if len(hex_color) != 6: return "#000000"
     r, g, b = tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
     brightness = (r * 0.299 + g * 0.587 + b * 0.114)
@@ -81,21 +81,24 @@ estilos_css = """
 """
 st.markdown(estilos_css, unsafe_allow_html=True)
 
-st.title("🏥 Planificador de Guardias Nefrología")
+st.title("🏥 Planificador de Guardias")
 
-# --- 5. SIDEBAR ---
+# --- 5. SIDEBAR (CON FILTRO DE DUPLICADOS) ---
 try: conf_c = {"Color": st.column_config.ColorColumn("🎨 Color")}
 except: conf_c = {}
 
 st.sidebar.header("👨‍⚕️ 1. Plantilla Adjuntos")
 df_adjuntos = st.sidebar.data_editor(st.session_state.adjuntos_init, num_rows="dynamic", key="edit_adj", column_config=conf_c)
+# Eliminamos duplicados por nombre y filas vacías para evitar errores de índice
+df_adjuntos = df_adjuntos.dropna(subset=["Nombre"]).drop_duplicates(subset=["Nombre"])
 
 st.sidebar.header("🎓 2. Plantilla Residentes")
 df_residentes = st.sidebar.data_editor(st.session_state.residentes_init, num_rows="dynamic", key="edit_res", column_config=conf_c)
+df_residentes = df_residentes.dropna(subset=["Nombre"]).drop_duplicates(subset=["Nombre"])
 
-ADJ_COLOR_MAP = {row["Nombre"]: row["Color"] for _, row in df_adjuntos.iterrows() if pd.notna(row["Nombre"])}
-RES_COLOR_MAP = {row["Nombre"]: row["Color"] for _, row in df_residentes.iterrows() if pd.notna(row["Nombre"])}
-USER_R_MAP = {row["Nombre"]: row["R"] for _, row in df_residentes.iterrows() if "R" in row and pd.notna(row["Nombre"])}
+ADJ_COLOR_MAP = {row["Nombre"]: row["Color"] for _, row in df_adjuntos.iterrows()}
+RES_COLOR_MAP = {row["Nombre"]: row["Color"] for _, row in df_residentes.iterrows()}
+USER_R_MAP = {row["Nombre"]: row["R"] for _, row in df_residentes.iterrows() if "R" in row}
 
 st.sidebar.header("📅 3. Periodo")
 mes_nombres = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
@@ -108,19 +111,21 @@ primer_dia = datetime(anio_sel, mes_ini, 1)
 ultimo_dia = datetime(anio_sel, mes_fin, calendar.monthrange(anio_sel, mes_fin)[1])
 rango_fechas = pd.date_range(primer_dia, ultimo_dia)
 
-# --- 6. AUSENCIAS (GRILLA REFORZADA) ---
+# --- 6. AUSENCIAS (GRILLA REFORZADA ANTI-TYPEERROR) ---
 st.subheader("📅 Grilla de Ausencias")
 
 def generar_grilla(nombres, key_p):
-    # Forzamos que si el nombre no existe en el set de ausencias, el valor sea False
     grid_data = {}
     for d in rango_fechas:
         col_name = d.strftime('%d/%m')
-        # Si el nombre no está en st.session_state, d in set() siempre es False
-        grid_data[col_name] = [d in st.session_state.ausencias_globales.get(n, set()) if pd.notna(n) else False for n in nombres]
+        # Aseguramos que el resultado sea estrictamente True/False (booleano)
+        grid_data[col_name] = [bool(d in st.session_state.ausencias_globales.get(n, set())) for n in nombres]
+    
+    # Creamos el DataFrame y forzamos el tipo bool
+    df_grid = pd.DataFrame(grid_data, index=nombres).astype(bool)
     
     return st.data_editor(
-        pd.DataFrame(grid_data, index=nombres), 
+        df_grid, 
         use_container_width=True, 
         key=f"g_{key_p}", 
         column_config={c: st.column_config.CheckboxColumn(c) for c in grid_data.keys()}
@@ -131,17 +136,17 @@ with t1: g_adj = generar_grilla(df_adjuntos["Nombre"].tolist(), "adj")
 with t2: g_res = generar_grilla(df_residentes["Nombre"].tolist(), "res")
 
 if st.button("☁️ Sincronizar y Guardar TODO"):
-    with st.spinner("Sincronizando..."):
-        # Guardar Plantillas
+    with st.spinner("Limpiando y Guardando..."):
+        # Guardar Plantillas Limpias
         for _, row in df_adjuntos.iterrows():
-            if pd.notna(row["Nombre"]): db.collection("plantilla_adjuntos").document(row["Nombre"]).set(row.to_dict())
+            db.collection("plantilla_adjuntos").document(row["Nombre"]).set(row.to_dict())
         for _, row in df_residentes.iterrows():
-            if pd.notna(row["Nombre"]): db.collection("plantilla_residentes").document(row["Nombre"]).set(row.to_dict())
+            db.collection("plantilla_residentes").document(row["Nombre"]).set(row.to_dict())
         
         # Sincronizar Ausencias
         for g, nombres in [(g_adj, df_adjuntos["Nombre"].tolist()), (g_res, df_residentes["Nombre"].tolist())]:
             for nom in nombres:
-                if pd.isna(nom) or nom == "": continue
+                if not nom: continue
                 row_data = g.loc[nom]
                 nuevas = {rango_fechas[i] for i, v in enumerate(row_data) if v}
                 fuera = {d for d in st.session_state.ausencias_globales.get(nom, set()) if not (primer_dia <= d <= ultimo_dia)}
@@ -149,7 +154,7 @@ if st.button("☁️ Sincronizar y Guardar TODO"):
                 st.session_state.ausencias_globales[nom] = final
                 db.collection("ausencias").document(nom).set({"nombre": nom, "fechas": [d.strftime('%Y-%m-%d') for d in final]})
         
-        st.success("✅ ¡Guardado! Datos limpios.")
+        st.success("✅ ¡Datos limpios y guardados!")
         st.rerun()
 
 # --- 7. MOTOR ---
