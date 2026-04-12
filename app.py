@@ -28,13 +28,12 @@ def iniciar_firestore():
 
 db = iniciar_firestore()
 
-# --- FUNCIONES DE APOYO (CONTRASTE Y PERSISTENCIA) ---
+# --- FUNCIONES DE APOYO ---
 def get_contrast_color(hex_color):
     """Calcula si el texto debe ser blanco o negro según el brillo del fondo."""
     hex_color = hex_color.lstrip('#')
     if len(hex_color) != 6: return "#000000"
     r, g, b = tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
-    # Fórmula de luminancia: Y = 0.299R + 0.587G + 0.114B
     brightness = (r * 0.299 + g * 0.587 + b * 0.114)
     return "#FFFFFF" if brightness < 150 else "#000000"
 
@@ -84,11 +83,9 @@ estilos_css = """
     .calendar-table th { background-color: #f8f9fa; padding: 10px; border: 1px solid #dee2e6; text-align: center; font-size: 1.1em; }
     .calendar-table td { height: 150px; width: 14%; border: 1px solid #dee2e6; vertical-align: top; padding: 6px; }
     .day-number { font-weight: bold; margin-bottom: 8px; color: #555; font-size: 1.1em; }
-    
     .adjunto-label, .residente-label { 
         padding: 6px; border-radius: 4px; font-size: 1.0em; font-weight: bold; 
         text-align: center; margin-top: 4px; border: 1px solid rgba(0,0,0,0.15);
-        box-shadow: 1px 1px 2px rgba(0,0,0,0.1);
     }
     .vacio-label { font-size: 0.85em; color: #888; text-align: center; margin-top: 6px; font-style: italic; }
     .summary-table { width: 100%; border-collapse: collapse; margin-top: 20px; font-size: 1.0em; }
@@ -137,11 +134,9 @@ with t1: g_adj = generar_grilla(df_adjuntos["Nombre"].tolist(), "adj")
 with t2: g_res = generar_grilla(df_residentes["Nombre"].tolist(), "res")
 
 if st.button("☁️ Sincronizar y Guardar TODO"):
-    with st.spinner("Guardando en la nube..."):
-        # Guardar Plantillas para que no se borren
+    with st.spinner("Guardando configuración..."):
         for i, row in df_adjuntos.iterrows(): guardar_doc_db("plantilla_adjuntos", f"adj_{i}", row.to_dict())
         for i, row in df_residentes.iterrows(): guardar_doc_db("plantilla_residentes", f"res_{i}", row.to_dict())
-        # Sincronizar Ausencias
         for g, nombres in [(g_adj, df_adjuntos["Nombre"].tolist()), (g_res, df_residentes["Nombre"].tolist())]:
             for nom in nombres:
                 row_data = g.loc[nom]
@@ -150,43 +145,60 @@ if st.button("☁️ Sincronizar y Guardar TODO"):
                 final = nuevas.union(fuera)
                 st.session_state.ausencias_globales[nom] = final
                 guardar_doc_db("ausencias", nom, {"fechas": [d.strftime('%Y-%m-%d') for d in final]})
-        st.success("✅ ¡Configuración guardada! Ya puedes refrescar la página sin perder nada.")
+        st.success("✅ ¡Guardado!")
 
-# --- 7. MOTOR ---
+# --- 7. MOTOR (LÓGICA DE BALANCEO REFORZADA) ---
 def resolver():
     model = cp_model.CpModel()
     num_dias = len(rango_fechas)
-    def aplicar_reglas(staff, prefix, es_adjunto):
+    
+    def aplicar_reglas_y_balance(staff, prefix, es_adjunto):
         n = len(staff); v = {(r, d): model.NewBoolVar(f'{prefix}_r{r}d{d}') for r in range(n) for d in range(num_dias)}
+        
+        # Días a balancear prioritariamente: Lunes(0), Jueves(3), Sábados(5), Domingos(6)
+        dias_a_balancear = [0, 3, 5, 6]
+        
         for d in range(num_dias):
-            if es_adjunto: model.Add(sum(v[(r, d)] for r in range(n)) == 1) # Adjuntos: Cobertura total
-            else: model.Add(sum(v[(r, d)] for r in range(n)) <= 1) # Residentes: Puede haber vacíos
+            if es_adjunto: model.Add(sum(v[(r, d)] for r in range(n)) == 1)
+            else: model.Add(sum(v[(r, d)] for r in range(n)) <= 1)
+            
             for r in range(n):
                 nom = staff.iloc[r]["Nombre"]
                 if rango_fechas[d] in st.session_state.ausencias_globales.get(nom, set()): model.Add(v[(r, d)] == 0)
                 if d < num_dias - 1: model.Add(v[(r, d)] + v[(r, d+1)] <= 1)
-                if rango_fechas[d].weekday() == 5 and d + 5 < num_dias: model.Add(v[(r, d+5)] == 0).OnlyEnforceIf(v[(r, d)]) # Sáb -> Jue
-                if rango_fechas[d].weekday() == 3 and d + 2 < num_dias: model.Add(v[(r, d+2)] == 0).OnlyEnforceIf(v[(r, d)]) # Jue -> Sáb
-                if not es_adjunto and rango_fechas[d].weekday() == 4 and d + 2 < num_dias: model.Add(v[(r, d)] <= v[(r, d+2)]) # Vie -> Dom
+                if rango_fechas[d].weekday() == 5 and d + 5 < num_dias: model.Add(v[(r, d+5)] == 0).OnlyEnforceIf(v[(r, d)])
+                if rango_fechas[d].weekday() == 3 and d + 2 < num_dias: model.Add(v[(r, d+2)] == 0).OnlyEnforceIf(v[(r, d)])
+                if not es_adjunto and rango_fechas[d].weekday() == 4 and d + 2 < num_dias: model.Add(v[(r, d)] <= v[(r, d+2)])
+
         objs = []
         for mes in list(set(rango_fechas.month)):
             idx_m = [d for d in range(num_dias) if rango_fechas[d].month == mes]
             idx_f = [d for d in idx_m if rango_fechas[d].weekday() in [5, 6]]
             for r in range(n):
                 t = staff.iloc[r]["Tope"]; model.Add(sum(v[(r, d)] for d in idx_m) <= t)
-                mf = 2 if t >= 4 else 1; model.Add(sum(v[(r, d)] for d in idx_f) <= mf)
-                for wd in range(7):
+                
+                # REGLA DE BALANCEO POR DÍA ESPECÍFICO (Lunes, Jueves, Sáb, Dom)
+                for wd in dias_a_balancear:
                     idx_wd = [d for d in idx_m if rango_fechas[d].weekday() == wd]
-                    model.Add(sum(v[(r, d)] for d in idx_wd) <= 2)
+                    suma_wd = sum(v[(r, d)] for d in idx_wd)
+                    model.Add(suma_wd <= 2) # Tope absoluto de 2 lunes, 2 jueves, etc. por mes
+                    
+                    # Penalización si alguien hace un segundo día igual antes de que el resto haga el primero
+                    hace_dos = model.NewBoolVar(f'{prefix}_r{r}m{mes}wd{wd}_h2')
+                    model.Add(suma_wd <= 1 + hace_dos)
+                    objs.append(hace_dos * -80000) # Multa fuerte por repetir día "sagrado"
+        
         for d in range(num_dias):
             wd = rango_fechas[d].weekday()
             pb = 100000 if wd == 4 else (101000 if wd == 1 else (102000 if wd == 2 else 110000))
             for r in range(n): objs.append(v[(r, d)] * (pb + random.randint(1, 999)))
         return v, objs
-    v_adj, o_adj = aplicar_reglas(df_adjuntos, "adj", True)
-    v_res, o_res = aplicar_reglas(df_residentes, "res", False)
+
+    v_adj, o_adj = aplicar_reglas_y_balance(df_adjuntos, "adj", True)
+    v_res, o_res = aplicar_reglas_y_balance(df_residentes, "res", False)
     model.Maximize(sum(o_adj) + sum(o_res))
     solver = cp_model.CpSolver()
+    
     if solver.Solve(model) in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
         res = []
         for d in range(num_dias):
@@ -213,13 +225,11 @@ def render_mes_html(df, m):
                 f_str = f"{anio_sel}-{m:02d}-{day:02d}"
                 row = df[df["Fecha"] == f_str].iloc[0]
                 html += f'<td><div class="day-number">{day}</div>'
-                # Bloque Adjunto con contraste dinámico
                 if row["Adjunto"] != "VACÍO":
                     color = ADJ_COLOR_MAP.get(row["Adjunto"], "#444")
                     txt_color = get_contrast_color(color)
                     html += f'<div class="adjunto-label" style="background-color: {color}; color: {txt_color};">{row["Adjunto"]}</div>'
                 else: html += '<div class="vacio-label">Adj: VACÍO</div>'
-                # Bloque Residente con contraste dinámico
                 if row["Residente"] != "VACÍO":
                     color = RES_COLOR_MAP.get(row["Residente"], "#fff")
                     txt_color = get_contrast_color(color)
@@ -230,7 +240,7 @@ def render_mes_html(df, m):
     return html + '</tbody></table>'
 
 st.divider()
-if st.button("🚀 Generar Planificación", type="primary"):
+if st.button("🚀 Generar Planificación Balanceada", type="primary"):
     df_f = resolver()
     if df_f is not None:
         def build_stats(df, col, staff, es_res):
@@ -252,14 +262,14 @@ if st.button("🚀 Generar Planificación", type="primary"):
         for m in range(mes_ini, mes_fin+1): html += render_mes_html(df_f, m)
         html += "<h2>📊 Adjuntos</h2>" + t_adj.to_html(classes="summary-table") + "<h2>📊 Residentes</h2>" + t_res.to_html(classes="summary-table") + "</body></html>"
         st.session_state.plan_generado = {"df": df_f, "html": html, "t_adj": t_adj, "t_res": t_res, "meses": range(mes_ini, mes_fin+1)}
-    else: st.error("❌ Los topes de los adjuntos no bastan para cubrir todos los días. Súbelos un poco.")
+    else: st.error("❌ Los topes o ausencias no permiten balancear el cuadrante. Prueba a subir algún tope.")
 
 if st.session_state.plan_generado:
     d = st.session_state.plan_generado
     for m in d["meses"]: st.write(render_mes_html(d["df"], m), unsafe_allow_html=True)
     st.divider()
     st.subheader("👨‍⚕️ Adjuntos")
-    st.dataframe(d["t_adj"])
+    st.dataframe(d["t_adj"].style.format(precision=0), use_container_width=True)
     st.subheader("🎓 Residentes")
-    st.dataframe(d["t_res"])
-    st.download_button("🎨 Descargar HTML", d["html"], "Plan.html", "text/html", type="primary")
+    st.dataframe(d["t_res"].style.format(precision=0), use_container_width=True)
+    st.download_button("🎨 Descargar HTML", d["html"], "Plan_Balanceado.html", "text/html", type="primary")
