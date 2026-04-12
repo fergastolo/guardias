@@ -33,6 +33,7 @@ def get_contrast_color(hex_color):
     hex_color = str(hex_color).lstrip('#')
     if len(hex_color) != 6: return "#000000"
     r, g, b = tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+    # Brillo basado en luminancia
     brightness = (r * 0.299 + g * 0.587 + b * 0.114)
     return "#FFFFFF" if brightness < 150 else "#000000"
 
@@ -83,13 +84,12 @@ st.markdown(estilos_css, unsafe_allow_html=True)
 
 st.title("🏥 Planificador de Guardias")
 
-# --- 5. SIDEBAR (CON FILTRO DE DUPLICADOS) ---
+# --- 5. SIDEBAR (GESTIÓN DE PLANTILLAS) ---
 try: conf_c = {"Color": st.column_config.ColorColumn("🎨 Color")}
 except: conf_c = {}
 
 st.sidebar.header("👨‍⚕️ 1. Plantilla Adjuntos")
 df_adjuntos = st.sidebar.data_editor(st.session_state.adjuntos_init, num_rows="dynamic", key="edit_adj", column_config=conf_c)
-# Eliminamos duplicados por nombre y filas vacías para evitar errores de índice
 df_adjuntos = df_adjuntos.dropna(subset=["Nombre"]).drop_duplicates(subset=["Nombre"])
 
 st.sidebar.header("🎓 2. Plantilla Residentes")
@@ -111,19 +111,16 @@ primer_dia = datetime(anio_sel, mes_ini, 1)
 ultimo_dia = datetime(anio_sel, mes_fin, calendar.monthrange(anio_sel, mes_fin)[1])
 rango_fechas = pd.date_range(primer_dia, ultimo_dia)
 
-# --- 6. AUSENCIAS (GRILLA REFORZADA ANTI-TYPEERROR) ---
+# --- 6. AUSENCIAS (GRILLA) ---
 st.subheader("📅 Grilla de Ausencias")
 
 def generar_grilla(nombres, key_p):
     grid_data = {}
     for d in rango_fechas:
         col_name = d.strftime('%d/%m')
-        # Aseguramos que el resultado sea estrictamente True/False (booleano)
         grid_data[col_name] = [bool(d in st.session_state.ausencias_globales.get(n, set())) for n in nombres]
     
-    # Creamos el DataFrame y forzamos el tipo bool
     df_grid = pd.DataFrame(grid_data, index=nombres).astype(bool)
-    
     return st.data_editor(
         df_grid, 
         use_container_width=True, 
@@ -137,13 +134,11 @@ with t2: g_res = generar_grilla(df_residentes["Nombre"].tolist(), "res")
 
 if st.button("☁️ Sincronizar y Guardar TODO"):
     with st.spinner("Limpiando y Guardando..."):
-        # Guardar Plantillas Limpias
         for _, row in df_adjuntos.iterrows():
             db.collection("plantilla_adjuntos").document(row["Nombre"]).set(row.to_dict())
         for _, row in df_residentes.iterrows():
             db.collection("plantilla_residentes").document(row["Nombre"]).set(row.to_dict())
         
-        # Sincronizar Ausencias
         for g, nombres in [(g_adj, df_adjuntos["Nombre"].tolist()), (g_res, df_residentes["Nombre"].tolist())]:
             for nom in nombres:
                 if not nom: continue
@@ -154,10 +149,10 @@ if st.button("☁️ Sincronizar y Guardar TODO"):
                 st.session_state.ausencias_globales[nom] = final
                 db.collection("ausencias").document(nom).set({"nombre": nom, "fechas": [d.strftime('%Y-%m-%d') for d in final]})
         
-        st.success("✅ ¡Datos limpios y guardados!")
+        st.success("✅ ¡Datos sincronizados!")
         st.rerun()
 
-# --- 7. MOTOR ---
+# --- 7. MOTOR DE RESOLUCIÓN ---
 def resolver():
     model = cp_model.CpModel()
     num_dias = len(rango_fechas)
@@ -205,7 +200,7 @@ def resolver():
         return pd.DataFrame(res)
     return None
 
-# --- 8. RENDER ---
+# --- 8. RENDERIZADO CALENDARIO ---
 def render_mes_html(df, m):
     cal = calendar.Calendar(firstweekday=0)
     html = f'<h3 class="mes-titulo">{mes_nombres[m-1]} {anio_sel}</h3><table class="calendar-table"><thead><tr>'
@@ -233,12 +228,14 @@ def render_mes_html(df, m):
         html += '</tr>'
     return html + '</tbody></table>'
 
+# --- 9. EJECUCIÓN Y GENERACIÓN DE RESULTADOS ---
 st.divider()
 if st.button("🚀 Generar Planificación", type="primary"):
     df_f = resolver()
     if df_f is not None:
         def build_stats(df, col, staff, es_res):
-            df_v = df[df[col] != "VACÍO"].copy(); df_v["Fecha"] = pd.to_datetime(df_v["Fecha"])
+            df_v = df[df[col] != "VACÍO"].copy()
+            df_v["Fecha"] = pd.to_datetime(df_v["Fecha"])
             ds = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
             df_v["Dia"] = df_v["Fecha"].dt.weekday.map(lambda x: ds[x])
             lbl = df_v[col].apply(lambda x: f"{x} ({USER_R_MAP.get(x, '')})") if es_res else df_v[col]
@@ -246,22 +243,37 @@ if st.button("🚀 Generar Planificación", type="primary"):
             t = pd.crosstab(lbl, df_v["Dia"])
             for d in ds:
                 if d not in t.columns: t[d] = 0
-            return t[ds].reindex(ord_p, fill_value=0)
+            t = t[ds].reindex(ord_p, fill_value=0)
+            
+            # AGREGAR COLUMNA DE TOTAL
+            t["TOTAL PERIODO"] = t.sum(axis=1)
+            return t
         
         t_adj = build_stats(df_f, "Adjunto", df_adjuntos, False)
         t_res = build_stats(df_f, "Residente", df_residentes, True)
-        html = f"<html><head><meta charset='utf-8'>{estilos_css}</head><body><h1>Planificación</h1>"
+        
+        html = f"<html><head><meta charset='utf-8'>{estilos_css}</head><body><h1>Planificación Nefrología</h1>"
         for m in range(mes_ini, mes_fin+1): html += render_mes_html(df_f, m)
-        html += "<h2>📊 Adjuntos</h2>" + t_adj.to_html(classes="summary-table") + "<h2>📊 Residentes</h2>" + t_res.to_html(classes="summary-table") + "</body></html>"
-        st.session_state.plan_generado = {"df": df_f, "html": html, "t_adj": t_adj, "t_res": t_res, "meses": range(mes_ini, mes_fin+1)}
-    else: st.error("❌ Los topes o ausencias no permiten balancear el cuadrante.")
+        html += "<h2>📊 Estadísticas Adjuntos</h2>" + t_adj.to_html(classes="summary-table")
+        html += "<h2>📊 Estadísticas Residentes</h2>" + t_res.to_html(classes="summary-table")
+        html += "</body></html>"
+        
+        st.session_state.plan_generado = {
+            "df": df_f, 
+            "html": html, 
+            "t_adj": t_adj, 
+            "t_res": t_res, 
+            "meses": range(mes_ini, mes_fin+1)
+        }
+    else: 
+        st.error("❌ Los topes o ausencias no permiten balancear el cuadrante. Prueba a subir algún tope.")
 
 if st.session_state.plan_generado:
     d = st.session_state.plan_generado
     for m in d["meses"]: st.write(render_mes_html(d["df"], m), unsafe_allow_html=True)
     st.divider()
-    st.subheader("👨‍⚕️ Adjuntos")
+    st.subheader("👨‍⚕️ Resumen Adjuntos")
     st.dataframe(d["t_adj"].style.format(precision=0), use_container_width=True)
-    st.subheader("🎓 Residentes")
+    st.subheader("🎓 Resumen Residentes")
     st.dataframe(d["t_res"].style.format(precision=0), use_container_width=True)
-    st.download_button("🎨 Descargar HTML", d["html"], "Plan.html", "text/html", type="primary")
+    st.download_button("🎨 Descargar Plan Completo (HTML)", d["html"], "Plan_Guardias.html", "text/html", type="primary")
