@@ -10,7 +10,7 @@ import base64
 import random
 
 # --- 1. CONFIGURACIÓN DE LA PÁGINA ---
-st.set_page_config(page_title="NefroPlanner Pro", layout="wide")
+st.set_page_config(page_title="Planificador de Guardias", layout="wide")
 
 # --- 2. CONEXIÓN A FIRESTORE ---
 @st.cache_resource
