@@ -334,8 +334,6 @@ def resolver():
                         if fijo_dom_val == nom and fijo_vie_val and fijo_vie_val != "VACÍO" and fijo_vie_val != nom: rompe_finde = True
                     if not rompe_finde: model.Add(v[(r, d)] <= v[(r, d+2)])
         objs = []
-        
-        # --- REGLAS MENSUALES (Topes y Fines de Semana) ---
         for m in list(set(rango_fechas.month)):
             idx_m = [d for d in range(n_dias) if rango_fechas[d].month == m]
             for r in range(n):
@@ -344,25 +342,11 @@ def resolver():
                     fijos_mes = sum(1 for d_idx in idx_m if st.session_state.guardias_fijas.get(rango_fechas[d_idx].strftime('%Y-%m-%d'), {}).get(rol_k) == nom)
                     tope_real = max(tope_real, fijos_mes)
                 model.Add(sum(v[(r, d)] for d in idx_m) <= tope_real)
-                
-                # Fines de semana: Sábados(5) y Domingos(6) -> Controlados MES A MES
-                for wd in [5, 6]:
+                for wd in [0, 3, 5, 6]:
                     idx_wd = [d for d in idx_m if rango_fechas[d].weekday() == wd]
                     suma_wd = sum(v[(r, d)] for d in idx_wd)
                     h2 = model.NewBoolVar(f'{prefix}_r{r}m{m}wd{wd}_h2')
                     model.Add(suma_wd <= 1 + h2); objs.append(h2 * -80000)
-
-        # --- REGLA GLOBAL DE EQUIDAD PARA LUNES Y JUEVES ---
-        for wd in [0, 3]: # Lunes(0) y Jueves(3) evaluados en todo el periodo
-            if n > 0:
-                # Creamos una variable para medir "el máximo" de guardias que hace la persona más castigada
-                max_var = model.NewIntVar(0, n_dias, f'{prefix}_max_wd{wd}')
-                for r in range(n):
-                    suma_wd_g = sum(v[(r, d)] for d in range(n_dias) if rango_fechas[d].weekday() == wd)
-                    model.Add(suma_wd_g <= max_var)
-                # Penalizamos duramente que este 'máximo' sea alto, obligando al sistema a aplastar el pico y repartir equitativamente
-                objs.append(max_var * -50000)
-
         for d in range(n_dias):
             for r in range(n): objs.append(v[(r, d)] * (100000 + random.randint(1, 999)))
         return v, objs
@@ -415,8 +399,13 @@ st.subheader("🚀 Generación de Resultados")
 if st.button("CALCULAR PLANIFICACIÓN", type="primary", use_container_width=True):
     df_f = resolver()
     if df_f is not None:
-        def build_stats(df, col, staff, es_res):
-            if staff.empty: return None
+        def build_stats(df, col, staff_in, es_res):
+            if staff_in.empty: return None
+            staff = staff_in.copy()
+            # Ordenamos R4 -> R1, y luego alfabéticamente si hay empate
+            if es_res and "R" in staff.columns:
+                staff = staff.sort_values(by=["R", "Nombre"], ascending=[False, True])
+                
             df_v = df[df[col] != "VACÍO"].copy()
             if df_v.empty: return pd.DataFrame()
             df_v["Fecha"] = pd.to_datetime(df_v["Fecha"]); ds = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
@@ -429,8 +418,13 @@ if st.button("CALCULAR PLANIFICACIÓN", type="primary", use_container_width=True
             t["TOTAL PERIODO"] = t.sum(axis=1)
             return t
         
-        def build_theoretical(staff, es_res):
-            if staff.empty: return None
+        def build_theoretical(staff_in, es_res):
+            if staff_in.empty: return None
+            staff = staff_in.copy()
+            # Ordenamos R4 -> R1, y luego alfabéticamente
+            if es_res and "R" in staff.columns:
+                staff = staff.sort_values(by=["R", "Nombre"], ascending=[False, True])
+                
             ds = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
             rows_list = []
             for _, r in staff.iterrows():
