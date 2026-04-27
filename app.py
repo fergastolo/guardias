@@ -409,9 +409,10 @@ if st.button("CALCULAR PLANIFICACIÓN", type="primary", use_container_width=True
             t = pd.crosstab(lbl, df_v["Dia"])
             for d in ds:
                 if d not in t.columns: t[d] = 0
-            return t[ds].reindex([f"{r['Nombre']} ({r['R']})" for _, r in staff.iterrows()] if es_res else staff["Nombre"].tolist(), fill_value=0)
+            t = t[ds].reindex([f"{r['Nombre']} ({r['R']})" for _, r in staff.iterrows()] if es_res else staff["Nombre"].tolist(), fill_value=0)
+            t["TOTAL PERIODO"] = t.sum(axis=1) # AQUI ESTA LA LINEA RECUPERADA
+            return t
         
-        # --- TABLA DE DISPONIBILIDAD TEÓRICA ---
         def build_theoretical(staff, es_res):
             if staff.empty: return None
             ds = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
