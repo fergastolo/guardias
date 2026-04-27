@@ -10,7 +10,7 @@ import base64
 import random
 
 # --- 1. CONFIGURACIÓN DE LA PÁGINA ---
-st.set_page_config(page_title="Planificador de Guardias (MODO DIAGNÓSTICO)", layout="wide")
+st.set_page_config(page_title="Planificador de Guardias", layout="wide")
 
 # --- 2. CONEXIÓN A FIRESTORE ---
 @st.cache_resource
@@ -63,8 +63,6 @@ def limpiar_nulos(val):
 dias_espanol = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
 
 # --- 3. INICIALIZACIÓN DE SESIÓN ---
-st.info(f"🌐 Conectado al Proyecto Firebase: **{project_id}**")
-
 if 'ausencias_globales' not in st.session_state:
     datos_aus = cargar_coleccion("ausencias")
     st.session_state.ausencias_globales = {item["nombre"]: {datetime.strptime(f, '%Y-%m-%d') for f in item.get("fechas", [])} for item in datos_aus if "nombre" in item}
@@ -106,26 +104,9 @@ estilos_css = """
 """
 st.markdown(estilos_css, unsafe_allow_html=True)
 
-st.title("🏥 Planificador de Guardias (Modo Diagnóstico)")
+st.title("🏥 Planificador de Guardias")
 
 # --- 5. SIDEBAR ---
-st.sidebar.header("🛠️ 1. TEST DE CONEXIÓN")
-if st.sidebar.button("🟡 PULSAR PARA TESTEAR FIREBASE", type="primary"):
-    with st.spinner("Enviando dato de prueba a la nube..."):
-        try:
-            if db is None:
-                st.sidebar.error("❌ NO HAY CONEXIÓN A LA BASE DE DATOS.")
-            else:
-                db.collection("TEST_DIAGNOSTICO").document("prueba_123").set({"estado": "Conexion perfecta", "hora": str(datetime.now())})
-                doc = db.collection("TEST_DIAGNOSTICO").document("prueba_123").get()
-                if doc.exists:
-                    st.sidebar.success(f"✅ ¡FUNCIONA! Firestore responde correctamente en el proyecto '{project_id}'. Revisa si ves la carpeta 'TEST_DIAGNOSTICO' en tu Firebase.")
-                else:
-                    st.sidebar.error("❌ Fallo fantasma: No lanzó error pero no lee el documento.")
-        except Exception as e:
-            st.sidebar.error(f"❌ ERROR DE PERMISOS: {e}")
-
-st.sidebar.divider()
 st.sidebar.header("⚙️ Configuración")
 incluir_adjuntos = st.sidebar.checkbox("✅ Incluir Adjuntos en la planificación", value=True)
 forzar_manuales = st.sidebar.checkbox("⚠️ Permitir que manuales rompan reglas", value=False)
@@ -200,18 +181,15 @@ with t3:
             "Día": st.column_config.TextColumn("Día de la semana", disabled=True),
             "Adjunto": st.column_config.SelectboxColumn("Adjunto Fijo", options=ops_adj),
             "Residente": st.column_config.SelectboxColumn("Residente Fijo", options=ops_res)
-        }, key="editor_manual_diagnostico"
+        }, key="editor_manual_final"
     )
 
 st.markdown("<br>", unsafe_allow_html=True)
 
 if st.button("☁️ SINCRONIZAR Y GUARDAR TODO", type="primary", use_container_width=True):
     exitos = 0
-    chivato_datos = []
-    
-    with st.spinner("Escribiendo documento a documento en Firebase..."):
+    with st.spinner("Guardando todo en Firebase..."):
         try:
-            # 1 y 2. Guardar Plantillas y Ausencias
             if incluir_adjuntos and not df_adjuntos.empty:
                 for _, row in df_adjuntos.iterrows(): db.collection("plantilla_adjuntos").document(row["Nombre"]).set({k: ("" if pd.isna(v) else v) for k, v in row.items()})
             if not df_residentes.empty:
@@ -229,7 +207,6 @@ if st.button("☁️ SINCRONIZAR Y GUARDAR TODO", type="primary", use_container_
                     st.session_state.ausencias_globales[nom] = final
                     db.collection("ausencias").document(nom).set({"nombre": nom, "fechas": [d.strftime('%Y-%m-%d') for d in final]})
             
-            # 3. Guardar Manuales (Documento a Documento, sin Batch)
             for _, row in df_manual_edit.iterrows():
                 f_str = row["Fecha"]
                 a_nom = limpiar_nulos(row["Adjunto"])
@@ -240,19 +217,14 @@ if st.button("☁️ SINCRONIZAR Y GUARDAR TODO", type="primary", use_container_
                     st.session_state.guardias_fijas[f_str] = data
                     if db: db.collection("guardias_fijas").document(f_str).set(data)
                     exitos += 1
-                    chivato_datos.append(f"{f_str[-5:]} ({r_nom})")
                 else:
                     if f_str in st.session_state.guardias_fijas:
                         del st.session_state.guardias_fijas[f_str]
                     if db: db.collection("guardias_fijas").document(f_str).delete()
             
-            if exitos > 0:
-                st.success(f"✅ ¡Guardado! La aplicación intentó enviar {exitos} guardias fijas a Firebase. \n\n**Datos detectados:** {', '.join(chivato_datos)}")
-            else:
-                st.warning("⚠️ La aplicación cree que has guardado 0 guardias. (El programa está leyendo toda la tabla como 'VACÍO').")
-            
+            st.success(f"✅ ¡Guardado completado! Se han sincronizado los datos.")
         except Exception as e:
-            st.error(f"❌ Error crítico al enviar a Firebase: {e}")
+            st.error(f"❌ Error al enviar a Firebase: {e}")
 
 # --- FUNCIÓN DETECTIVE DE CONFLICTOS ---
 def diagnosticar_conflictos():
@@ -496,21 +468,25 @@ if st.session_state.plan_generado:
     meses_a_renderizar = d.get("meses", [])
     modo_adj_render = d.get("adj", True)
     
+    full_html = f"<html><head><meta charset='utf-8'>{estilos_css}</head><body><h1>Planificación de Guardias</h1>"
+    
     for m in meses_a_renderizar: 
-        st.write(render_mes_html(d["df"], m, modo_adj_render), unsafe_allow_html=True)
+        mes_html = render_mes_html(d["df"], m, modo_adj_render)
+        st.write(mes_html, unsafe_allow_html=True)
+        full_html += mes_html
+        
         st.markdown("<br>", unsafe_allow_html=True)
         
         # --- BLOQUEO INDIVIDUAL POR MES ---
         if st.button(f"🔒 Fijar y Bloquear guardias de {mes_nombres[m-1]}", key=f"lock_btn_{m}", use_container_width=True):
             with st.spinner(f"Bloqueando guardias de {mes_nombres[m-1]}..."):
-                batch = db.batch() if db else None
                 df_m = d["df"][pd.to_datetime(d["df"]["Fecha"]).dt.month == m]
                 for _, row in df_m.iterrows():
                     f_str = row["Fecha"]
                     data = {"Adjunto": row["Adjunto"], "Residente": row["Residente"]}
                     st.session_state.guardias_fijas[f_str] = data
                     if db: db.collection("guardias_fijas").document(f_str).set(data)
-                st.success(f"✅ Guardias de {mes_nombres[m-1]} fijadas. Ve al editor manual si necesitas hacer retoques.")
+                st.success(f"✅ Guardias de {mes_nombres[m-1]} fijadas en la nube. Ve al editor manual si necesitas hacer retoques.")
         st.markdown("<br><br>", unsafe_allow_html=True)
         
     st.divider()
@@ -518,8 +494,22 @@ if st.session_state.plan_generado:
     if modo_adj_render and t_adj is not None and not t_adj.empty:
         st.subheader("👨‍⚕️ Resumen Adjuntos")
         st.dataframe(t_adj.style.format(precision=0), use_container_width=True)
+        full_html += "<h2>👨‍⚕️ Resumen Adjuntos</h2>" + t_adj.to_html(classes="summary-table")
         
     t_res = d.get("t_res")
     if t_res is not None and not t_res.empty:
         st.subheader("🎓 Resumen Residentes")
         st.dataframe(t_res.style.format(precision=0), use_container_width=True)
+        full_html += "<h2>🎓 Resumen Residentes</h2>" + t_res.to_html(classes="summary-table")
+        
+    full_html += "</body></html>"
+    
+    st.markdown("<br><br>", unsafe_allow_html=True)
+    st.download_button(
+        label="📄 Descargar Planificación en HTML",
+        data=full_html,
+        file_name="planificacion_guardias.html",
+        mime="text/html",
+        type="primary",
+        use_container_width=True
+    )
