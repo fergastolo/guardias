@@ -108,8 +108,8 @@ st.title("🏥 Planificador de Guardias")
 
 # --- 5. SIDEBAR ---
 st.sidebar.header("⚙️ Configuración")
-incluir_adjuntos = st.sidebar.checkbox("✅ Incluir Adjuntos", value=True)
-forzar_manuales = st.sidebar.checkbox("⚠️ Permitir que manuales rompan reglas", value=False, help="Si marcas esto, la IA ignorará topes o descansos SOLO para las guardias a mano.")
+incluir_adjuntos = st.sidebar.checkbox("✅ Incluir Adjuntos en la planificación", value=True)
+forzar_manuales = st.sidebar.checkbox("⚠️ Permitir que manuales rompan reglas", value=False, help="Ignora topes o descansos SOLO para las guardias a mano.")
 st.sidebar.divider()
 
 try: conf_c = {"Color": st.column_config.ColorColumn("🎨 Color")}
@@ -172,7 +172,7 @@ with t2:
     g_res = generar_grilla(df_residentes["Nombre"].tolist(), "res") if not df_residentes.empty else pd.DataFrame()
 
 with t3:
-    st.info("💡 Haz clic fuera de la celda tras editar un nombre y luego pulsa Guardar.")
+    st.info("💡 Edita lo que necesites y dale al botón azul de abajo.")
     ops_adj = ["VACÍO"] + (df_adjuntos["Nombre"].tolist() if not df_adjuntos.empty else [])
     ops_res = ["VACÍO"] + (df_residentes["Nombre"].tolist() if not df_residentes.empty else [])
     
@@ -190,20 +190,20 @@ with t3:
         pd.DataFrame(filas_manual), use_container_width=True, hide_index=True,
         column_config={
             "Fecha": st.column_config.TextColumn("Fecha", disabled=True),
-            "Día": st.column_config.TextColumn("Día", disabled=True),
+            "Día": st.column_config.TextColumn("Día de la semana", disabled=True),
             "Adjunto": st.column_config.SelectboxColumn("Adjunto Fijo", options=ops_adj),
             "Residente": st.column_config.SelectboxColumn("Residente Fijo", options=ops_res)
-        }, key="editor_manual_final_v2"
+        }, key="editor_manual_final_fuerza_bruta"
     )
 
 st.markdown("<br>", unsafe_allow_html=True)
 
 # -------------------------------------------------------------
-# EL BOTÓN DE GUARDADO INTELIGENTE (LA CURA A TU PROBLEMA)
+# BOTÓN DE FUERZA BRUTA (Aplaza Firebase con lo que hay en pantalla)
 # -------------------------------------------------------------
 if st.button("☁️ SINCRONIZAR Y GUARDAR TODO (Ausencias y Manuales)", type="primary", use_container_width=True):
-    exitos_manuales = 0
-    with st.spinner("Comparando datos y guardando en la nube..."):
+    exitos = 0
+    with st.spinner("Escribiendo datos en la nube..."):
         try:
             batch = db.batch() if db else None
             
@@ -228,42 +228,27 @@ if st.button("☁️ SINCRONIZAR Y GUARDAR TODO (Ausencias y Manuales)", type="p
                     st.session_state.ausencias_globales[nom] = final
                     if batch: batch.set(db.collection("ausencias").document(nom), {"nombre": nom, "fechas": [d.strftime('%Y-%m-%d') for d in final]})
             
-            # 3. Guardar Manuales (CON DETECCIÓN INTELIGENTE DE CAMBIOS)
+            # 3. Guardar Manuales (FUERZA BRUTA)
             for _, row in df_manual_edit.iterrows():
                 f_str = row["Fecha"]
                 a_nom = limpiar_nulos(row["Adjunto"])
                 r_nom = limpiar_nulos(row["Residente"])
                 
-                actual = st.session_state.guardias_fijas.get(f_str, {})
-                a_actual = limpiar_nulos(actual.get("Adjunto"))
-                r_actual = limpiar_nulos(actual.get("Residente"))
-                
-                # ¡LA CLAVE! Solo guardamos si realmente has cambiado algo
-                if a_nom == a_actual and r_nom == r_actual:
-                    continue
-                
-                exitos_manuales += 1
                 if a_nom != "VACÍO" or r_nom != "VACÍO":
                     data = {"Adjunto": a_nom, "Residente": r_nom}
                     st.session_state.guardias_fijas[f_str] = data
                     if batch: batch.set(db.collection("guardias_fijas").document(f_str), data)
+                    exitos += 1
                 else:
                     if f_str in st.session_state.guardias_fijas:
                         del st.session_state.guardias_fijas[f_str]
-                        if batch: batch.delete(db.collection("guardias_fijas").document(f_str))
+                    if batch: batch.delete(db.collection("guardias_fijas").document(f_str))
             
             if batch: batch.commit()
-            
-            if exitos_manuales > 0:
-                st.success(f"✅ ¡Por fin! Se han detectado y guardado {exitos_manuales} cambios nuevos en las guardias fijas.")
-            else:
-                st.info("ℹ️ Ausencias sincronizadas. No detecté cambios en la tabla manual (asegúrate de hacer clic fuera de la celda al editar).")
-            
-            st.rerun()
+            st.success(f"✅ ¡Guardado completado! Tienes {exitos} guardias fijadas en total en la nube.")
             
         except Exception as e:
             st.error(f"❌ Error crítico al enviar a Firebase: {e}")
-
 
 # --- FUNCIÓN DETECTIVE DE CONFLICTOS ---
 def diagnosticar_conflictos():
@@ -523,7 +508,6 @@ if st.session_state.plan_generado:
                     if batch: batch.set(db.collection("guardias_fijas").document(f_str), data)
                 if batch: batch.commit()
                 st.success(f"✅ Guardias de {mes_nombres[m-1]} fijadas. Ve al editor manual si necesitas hacer retoques.")
-                st.rerun()
         st.markdown("<br><br>", unsafe_allow_html=True)
         
     st.divider()
