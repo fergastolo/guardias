@@ -231,8 +231,9 @@ with col_sync:
                     if not nom: continue
                     nuevas = {rango_fechas[i] for i, v in enumerate(g.loc[nom]) if v}
                     fuera = {d for d in st.session_state.ausencias_globales.get(nom, set()) if not (rango_fechas[0] <= d <= rango_fechas[-1])}
-                    st.session_state.ausencias_globales[nom] = nuevas.union(fuera)
-                    db.collection("ausencias").document(nom).set({"nombre": nom, "fechas": [d.strftime('%Y-%m-%d') for d in st.session_state.ausencias_globales[nom]]})
+                    final = nuevas.union(fuera)
+                    st.session_state.ausencias_globales[nom] = final
+                    db.collection("ausencias").document(nom).set({"nombre": nom, "fechas": [d.strftime('%Y-%m-%d') for d in final]})
             st.success("✅ Sincronizado."); st.rerun()
 
 # --- FUNCIÓN DETECTIVE DE CONFLICTOS ---
@@ -240,17 +241,7 @@ def diagnosticar_conflictos():
     errores = []
     n_dias = len(rango_fechas)
 
-    # 1. Topes insuficientes
-    for m in list(set(rango_fechas.month)):
-        dias_mes = sum(1 for d in rango_fechas if d.month == m)
-        if incluir_adjuntos and not df_adjuntos.empty:
-            tope_adj = df_adjuntos["Tope"].sum()
-            if tope_adj < dias_mes: errores.append(f"**Adjuntos en mes {m}:** Hay {dias_mes} días, pero la suma de topes es solo {tope_adj}.")
-        if not df_residentes.empty:
-            tope_res = df_residentes["Tope"].sum()
-            if tope_res < dias_mes: errores.append(f"**Residentes en mes {m}:** Hay {dias_mes} días, pero la suma de topes es solo {tope_res}.")
-
-    # 2. Fijos vs Ausencias y Reglas
+    # Solo verificamos Fijos vs Ausencias y Reglas Matemáticas Inquebrantables
     for df_staff, is_adj, rol in [(df_adjuntos, True, "Adjunto"), (df_residentes, False, "Residente")]:
         if is_adj and not incluir_adjuntos: continue
         if df_staff.empty: continue
@@ -272,32 +263,21 @@ def diagnosticar_conflictos():
                         errores.append(f"**{nom}** tiene asignada la guardia fija del {f_str} pero está marcado como **AUSENTE**.")
 
             for m, count in fijos_mes.items():
-                if count > tope: errores.append(f"**{nom}** tiene {count} guardias fijadas en el mes {m}, pero su tope es {tope}.")
+                if count > tope: errores.append(f"**{nom}** tiene {count} guardias fijadas en el mes {m}, pero su tope en la barra lateral es de solo {tope}.")
 
             for i in dias_idx:
                 if i + 1 in dias_idx:
                     errores.append(f"**{nom}** tiene guardias consecutivas fijadas: {rango_fechas[i].strftime('%d/%m')} y {rango_fechas[i+1].strftime('%d/%m')}.")
                 wd = rango_fechas[i].weekday()
                 if wd == 5 and i + 5 in dias_idx:
-                    errores.append(f"**{nom}** está fijado el Sábado {rango_fechas[i].strftime('%d/%m')} y el Jueves {rango_fechas[i+5].strftime('%d/%m')} (Rompiste la regla Sáb->Jue).")
+                    errores.append(f"**{nom}** está fijado el Sábado {rango_fechas[i].strftime('%d/%m')} y el Jueves {rango_fechas[i+5].strftime('%d/%m')} (Rompiste la regla de descanso Sáb->Jue).")
                 if wd == 3 and i + 2 in dias_idx:
-                    errores.append(f"**{nom}** está fijado el Jueves {rango_fechas[i].strftime('%d/%m')} y el Sábado {rango_fechas[i+2].strftime('%d/%m')} (Rompiste la regla Jue->Sáb).")
+                    errores.append(f"**{nom}** está fijado el Jueves {rango_fechas[i].strftime('%d/%m')} y el Sábado {rango_fechas[i+2].strftime('%d/%m')} (Rompiste la regla de descanso Jue->Sáb).")
                 if not is_adj and wd == 4 and i + 2 < n_dias:
                     f2_str = rango_fechas[i+2].strftime('%Y-%m-%d')
                     fijo_dom = st.session_state.guardias_fijas.get(f2_str, {}).get("Residente")
                     if fijo_dom and fijo_dom != "VACÍO" and fijo_dom != nom:
-                        errores.append(f"**{nom}** hace el Viernes {rango_fechas[i].strftime('%d/%m')}, pero el Domingo está fijado manualmente para **{fijo_dom}** (Rompiste la regla de fin de semana).")
-
-    # 3. Días sin personal
-    for d in range(n_dias):
-        fecha = rango_fechas[d]
-        f_str = fecha.strftime('%d/%m')
-        if incluir_adjuntos and not df_adjuntos.empty:
-            if sum(1 for _, r in df_adjuntos.iterrows() if fecha not in st.session_state.ausencias_globales.get(r["Nombre"], set())) == 0:
-                errores.append(f"El {f_str} **TODOS** los adjuntos están ausentes. Imposible cubrir.")
-        if not df_residentes.empty:
-            if sum(1 for _, r in df_residentes.iterrows() if fecha not in st.session_state.ausencias_globales.get(r["Nombre"], set())) == 0:
-                errores.append(f"El {f_str} **TODOS** los residentes están ausentes. Imposible cubrir.")
+                        errores.append(f"**{nom}** hace el Viernes {rango_fechas[i].strftime('%d/%m')}, pero el Domingo está fijado manualmente para **{fijo_dom}**.")
 
     return list(set(errores))
 
@@ -313,8 +293,9 @@ def resolver():
         for d in range(num_dias):
             f_str = rango_fechas[d].strftime('%Y-%m-%d')
             fijo = st.session_state.guardias_fijas.get(f_str)
-            if es_adj: model.Add(sum(v[(r, d)] for r in range(n)) == 1)
-            else: model.Add(sum(v[(r, d)] for r in range(n)) <= 1)
+            
+            # AHORA AMBOS PUEDEN QUEDAR VACÍOS SI SE ACABAN LOS TOPES (<= 1)
+            model.Add(sum(v[(r, d)] for r in range(n)) <= 1)
             
             if fijo:
                 val = fijo.get("Adjunto") if es_adj else fijo.get("Residente")
@@ -341,6 +322,8 @@ def resolver():
                     suma_wd = sum(v[(r, d)] for d in idx_wd)
                     h2 = model.NewBoolVar(f'{prefix}_r{r}m{m}wd{wd}_h2')
                     model.Add(suma_wd <= 1 + h2); objs.append(h2 * -80000)
+        
+        # PREMIO ALTO POR ASIGNAR: Esto hace que intente llenar todos los días hasta agotar topes
         for d in range(num_dias):
             for r in range(n): objs.append(v[(r, d)] * (100000 + random.randint(1, 999)))
         return v, objs
@@ -419,14 +402,13 @@ if st.button("🚀 Generar Planificación", type="primary"):
         st.session_state.plan_generado["html"] = html
         
     else: 
-        # LLAMAMOS AL DETECTIVE DE CONFLICTOS
         conflictos = diagnosticar_conflictos()
         if conflictos:
             st.error("❌ El sistema no pudo cuadrar el calendario porque encontró las siguientes contradicciones en tus datos:")
             for error in conflictos:
                 st.warning(f"⚠️ {error}")
         else:
-            st.error("❌ Conflicto matemático complejo (ej. reglas de descanso que se cruzan sin salida posible). Prueba a flexibilizar los topes o quitar ausencias.")
+            st.error("❌ Conflicto matemático complejo. Prueba a flexibilizar los topes o quitar ausencias.")
 
 if st.session_state.plan_generado:
     d = st.session_state.plan_generado
