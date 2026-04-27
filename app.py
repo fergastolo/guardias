@@ -277,13 +277,15 @@ def diagnosticar_conflictos():
                     vie_fijo = st.session_state.guardias_fijas.get(rango_fechas[dia_idx-2].strftime('%Y-%m-%d'), {}).get(rol_k)
                     if vie_fijo and vie_fijo != "VACÍO" and vie_fijo != nom: continue
                     
-            # 5. Comprobación de Topes Mensuales
+            # 5. Comprobación de Topes Mensuales - NUEVA LÓGICA FLEXIBLE
             mes_actual = d_date.month
             guardias_este_mes = sum(1 for d in range(n_dias) if rango_fechas[d].month == mes_actual and st.session_state.guardias_fijas.get(rango_fechas[d].strftime('%Y-%m-%d'), {}).get(rol_k) == nom)
-            if guardias_este_mes >= r["Tope"]: continue # Si ya llenó su tope con manuales, se descarta
+            if guardias_este_mes >= r["Tope"]:
+                disponibles.append(f"{nom} (⚠️ Excede tope)") # Lo sugiere pero avisa de que tendrías que quitarle otra guardia para compensar
+            else:
+                disponibles.append(nom)
 
-            disponibles.append(nom)
-        return disponibles[:3]
+        return disponibles[:4] # Devolvemos hasta 4 opciones
 
     for df_staff, is_adj, rol in [(df_adjuntos, True, "Adjunto"), (df_residentes, False, "Residente")]:
         if is_adj and not incluir_adjuntos: continue
