@@ -62,7 +62,7 @@ def limpiar_nulos(val):
 
 dias_espanol = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
 
-# --- 3. INICIALIZACIÓN DE SESIÓN BLINDADA ---
+# --- 3. INICIALIZACIÓN DE SESIÓN ---
 if 'ausencias_globales' not in st.session_state:
     datos_aus = cargar_coleccion("ausencias")
     st.session_state.ausencias_globales = {item["nombre"]: {datetime.strptime(f, '%Y-%m-%d') for f in item.get("fechas", [])} for item in datos_aus if "nombre" in item}
@@ -108,8 +108,8 @@ st.title("🏥 Planificador de Guardias")
 
 # --- 5. SIDEBAR ---
 st.sidebar.header("⚙️ Configuración")
-incluir_adjuntos = st.sidebar.checkbox("✅ Incluir Adjuntos en la planificación", value=True)
-forzar_manuales = st.sidebar.checkbox("⚠️ Permitir que manuales rompan reglas", value=False, help="Si marcas esto, la IA ignorará topes, ausencias o reglas de descanso SOLO para las guardias que asignes a mano. El resto de días vacíos los rellenará cumpliendo las reglas.")
+incluir_adjuntos = st.sidebar.checkbox("✅ Incluir Adjuntos", value=True)
+forzar_manuales = st.sidebar.checkbox("⚠️ Permitir que manuales rompan reglas", value=False, help="Si marcas esto, la IA ignorará topes o descansos SOLO para las guardias a mano.")
 st.sidebar.divider()
 
 try: conf_c = {"Color": st.column_config.ColorColumn("🎨 Color")}
@@ -143,24 +143,17 @@ anio_sel = st.sidebar.number_input("Año", value=2026)
 rango_fechas = pd.date_range(datetime(anio_sel, mes_ini, 1), datetime(anio_sel, mes_fin, calendar.monthrange(anio_sel, mes_fin)[1]))
 
 st.sidebar.divider()
-st.sidebar.header("🚨 Limpieza de Base de Datos")
-if st.sidebar.button("🗑️ Borrar TODAS las Guardias Fijas", type="primary"):
-    with st.spinner("Borrando historial de la base de datos..."):
-        if db:
-            docs = db.collection("guardias_fijas").stream()
-            batch = db.batch()
-            for doc in docs: batch.delete(doc.reference)
-            batch.commit()
-        st.session_state.guardias_fijas = {}
-    st.sidebar.success("✅ Base de datos limpia."); st.rerun()
-
-if st.sidebar.button("🔓 Desbloquear Solo Periodo Actual"):
-    for d in rango_fechas:
-        f_str = d.strftime('%Y-%m-%d')
-        if f_str in st.session_state.guardias_fijas:
-            if db: db.collection("guardias_fijas").document(f_str).delete()
-            del st.session_state.guardias_fijas[f_str]
-    st.rerun()
+with st.sidebar.expander("🚨 Zona de Peligro"):
+    st.warning("Borra de la nube todas las guardias fijadas.")
+    if st.button("🗑️ Borrar TODAS", type="primary"):
+        with st.spinner("Borrando historial..."):
+            if db:
+                docs = db.collection("guardias_fijas").stream()
+                batch = db.batch()
+                for doc in docs: batch.delete(doc.reference)
+                batch.commit()
+            st.session_state.guardias_fijas = {}
+        st.success("✅ Limpio."); st.rerun()
 
 # --- 6. AUSENCIAS Y EDITOR MANUAL ---
 st.subheader("📅 Grilla de Ausencias y Editor Manual")
@@ -179,7 +172,7 @@ with t2:
     g_res = generar_grilla(df_residentes["Nombre"].tolist(), "res") if not df_residentes.empty else pd.DataFrame()
 
 with t3:
-    st.info("💡 Asigna manualmente. Haz clic fuera de la celda antes de darle al botón de Guardar.")
+    st.info("💡 Haz clic fuera de la celda tras editar un nombre y luego pulsa Guardar.")
     ops_adj = ["VACÍO"] + (df_adjuntos["Nombre"].tolist() if not df_adjuntos.empty else [])
     ops_res = ["VACÍO"] + (df_residentes["Nombre"].tolist() if not df_residentes.empty else [])
     
@@ -197,17 +190,24 @@ with t3:
         pd.DataFrame(filas_manual), use_container_width=True, hide_index=True,
         column_config={
             "Fecha": st.column_config.TextColumn("Fecha", disabled=True),
-            "Día": st.column_config.TextColumn("Día de la semana", disabled=True),
+            "Día": st.column_config.TextColumn("Día", disabled=True),
             "Adjunto": st.column_config.SelectboxColumn("Adjunto Fijo", options=ops_adj),
             "Residente": st.column_config.SelectboxColumn("Residente Fijo", options=ops_res)
-        }, key="editor_manual"
+        }, key="editor_manual_final_v2"
     )
 
 st.markdown("<br>", unsafe_allow_html=True)
-if st.button("☁️ SINCRONIZAR Y GUARDAR TODO (Plantillas, Ausencias y Manuales)", type="primary", use_container_width=True):
-    with st.spinner("Desinfectando datos y guardando en la nube..."):
+
+# -------------------------------------------------------------
+# EL BOTÓN DE GUARDADO INTELIGENTE (LA CURA A TU PROBLEMA)
+# -------------------------------------------------------------
+if st.button("☁️ SINCRONIZAR Y GUARDAR TODO (Ausencias y Manuales)", type="primary", use_container_width=True):
+    exitos_manuales = 0
+    with st.spinner("Comparando datos y guardando en la nube..."):
         try:
             batch = db.batch() if db else None
+            
+            # 1. Guardar Plantillas
             if incluir_adjuntos and not df_adjuntos.empty:
                 for _, row in df_adjuntos.iterrows(): 
                     if batch: batch.set(db.collection("plantilla_adjuntos").document(row["Nombre"]), {k: ("" if pd.isna(v) else v) for k, v in row.items()})
@@ -215,10 +215,10 @@ if st.button("☁️ SINCRONIZAR Y GUARDAR TODO (Plantillas, Ausencias y Manuale
                 for _, row in df_residentes.iterrows(): 
                     if batch: batch.set(db.collection("plantilla_residentes").document(row["Nombre"]), {k: ("" if pd.isna(v) else v) for k, v in row.items()})
             
+            # 2. Guardar Ausencias
             listas_sync = []
             if not df_residentes.empty: listas_sync.append((g_res, df_residentes["Nombre"].tolist()))
             if incluir_adjuntos and not df_adjuntos.empty: listas_sync.append((g_adj, df_adjuntos["Nombre"].tolist()))
-            
             for g, nombres in listas_sync:
                 for nom in nombres:
                     if not nom: continue
@@ -228,11 +228,21 @@ if st.button("☁️ SINCRONIZAR Y GUARDAR TODO (Plantillas, Ausencias y Manuale
                     st.session_state.ausencias_globales[nom] = final
                     if batch: batch.set(db.collection("ausencias").document(nom), {"nombre": nom, "fechas": [d.strftime('%Y-%m-%d') for d in final]})
             
+            # 3. Guardar Manuales (CON DETECCIÓN INTELIGENTE DE CAMBIOS)
             for _, row in df_manual_edit.iterrows():
                 f_str = row["Fecha"]
                 a_nom = limpiar_nulos(row["Adjunto"])
                 r_nom = limpiar_nulos(row["Residente"])
                 
+                actual = st.session_state.guardias_fijas.get(f_str, {})
+                a_actual = limpiar_nulos(actual.get("Adjunto"))
+                r_actual = limpiar_nulos(actual.get("Residente"))
+                
+                # ¡LA CLAVE! Solo guardamos si realmente has cambiado algo
+                if a_nom == a_actual and r_nom == r_actual:
+                    continue
+                
+                exitos_manuales += 1
                 if a_nom != "VACÍO" or r_nom != "VACÍO":
                     data = {"Adjunto": a_nom, "Residente": r_nom}
                     st.session_state.guardias_fijas[f_str] = data
@@ -243,10 +253,17 @@ if st.button("☁️ SINCRONIZAR Y GUARDAR TODO (Plantillas, Ausencias y Manuale
                         if batch: batch.delete(db.collection("guardias_fijas").document(f_str))
             
             if batch: batch.commit()
-            st.success("✅ ¡Éxito absoluto! Guardias manuales fijadas en la base de datos.")
+            
+            if exitos_manuales > 0:
+                st.success(f"✅ ¡Por fin! Se han detectado y guardado {exitos_manuales} cambios nuevos en las guardias fijas.")
+            else:
+                st.info("ℹ️ Ausencias sincronizadas. No detecté cambios en la tabla manual (asegúrate de hacer clic fuera de la celda al editar).")
+            
             st.rerun()
+            
         except Exception as e:
             st.error(f"❌ Error crítico al enviar a Firebase: {e}")
+
 
 # --- FUNCIÓN DETECTIVE DE CONFLICTOS ---
 def diagnosticar_conflictos():
@@ -355,26 +372,21 @@ def resolver():
                 nom = staff.iloc[r]["Nombre"]
                 fijo_d = (fijo.get(rol_k) == nom) if fijo else False
                 
-                # 1. Ausencias
                 if rango_fechas[d] in st.session_state.ausencias_globales.get(nom, set()): 
                     if not (forzar_manuales and fijo_d): model.Add(v[(r, d)] == 0)
                 
-                # 2. Consecutivos
                 if d < n_dias - 1:
                     fijo_d1 = st.session_state.guardias_fijas.get(rango_fechas[d+1].strftime('%Y-%m-%d'), {}).get(rol_k) == nom
                     if not (forzar_manuales and fijo_d and fijo_d1): model.Add(v[(r, d)] + v[(r, d+1)] <= 1)
                 
-                # 3. Descanso Sáb -> Jue
                 if rango_fechas[d].weekday() == 5 and d+5 < n_dias:
                     fijo_jue = st.session_state.guardias_fijas.get(rango_fechas[d+5].strftime('%Y-%m-%d'), {}).get(rol_k) == nom
                     if not (forzar_manuales and fijo_d and fijo_jue): model.Add(v[(r, d+5)] == 0).OnlyEnforceIf(v[(r, d)])
                 
-                # 4. Descanso Jue -> Sáb
                 if rango_fechas[d].weekday() == 3 and d+2 < n_dias:
                     fijo_sab = st.session_state.guardias_fijas.get(rango_fechas[d+2].strftime('%Y-%m-%d'), {}).get(rol_k) == nom
                     if not (forzar_manuales and fijo_d and fijo_sab): model.Add(v[(r, d+2)] == 0).OnlyEnforceIf(v[(r, d)])
                 
-                # 5. Fin de semana completo (Solo residentes)
                 if not es_adj and rango_fechas[d].weekday() == 4 and d+2 < n_dias:
                     fijo_dom_val = st.session_state.guardias_fijas.get(rango_fechas[d+2].strftime('%Y-%m-%d'), {}).get(rol_k)
                     fijo_vie_val = st.session_state.guardias_fijas.get(rango_fechas[d].strftime('%Y-%m-%d'), {}).get(rol_k)
@@ -492,15 +504,29 @@ if st.button("CALCULAR PLANIFICACIÓN", type="primary", use_container_width=True
 
 if st.session_state.plan_generado:
     d = st.session_state.plan_generado
-    
     meses_a_renderizar = d.get("meses", [])
     modo_adj_render = d.get("adj", True)
     
     for m in meses_a_renderizar: 
         st.write(render_mes_html(d["df"], m, modo_adj_render), unsafe_allow_html=True)
+        st.markdown("<br>", unsafe_allow_html=True)
+        
+        # --- BLOQUEO INDIVIDUAL POR MES ---
+        if st.button(f"🔒 Fijar y Bloquear guardias de {mes_nombres[m-1]}", key=f"lock_btn_{m}", use_container_width=True):
+            with st.spinner(f"Bloqueando guardias de {mes_nombres[m-1]}..."):
+                batch = db.batch() if db else None
+                df_m = d["df"][pd.to_datetime(d["df"]["Fecha"]).dt.month == m]
+                for _, row in df_m.iterrows():
+                    f_str = row["Fecha"]
+                    data = {"Adjunto": row["Adjunto"], "Residente": row["Residente"]}
+                    st.session_state.guardias_fijas[f_str] = data
+                    if batch: batch.set(db.collection("guardias_fijas").document(f_str), data)
+                if batch: batch.commit()
+                st.success(f"✅ Guardias de {mes_nombres[m-1]} fijadas. Ve al editor manual si necesitas hacer retoques.")
+                st.rerun()
+        st.markdown("<br><br>", unsafe_allow_html=True)
         
     st.divider()
-    
     t_adj = d.get("t_adj")
     if modo_adj_render and t_adj is not None and not t_adj.empty:
         st.subheader("👨‍⚕️ Resumen Adjuntos")
