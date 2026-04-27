@@ -10,7 +10,7 @@ import base64
 import random
 
 # --- 1. CONFIGURACIÓN DE LA PÁGINA ---
-st.set_page_config(page_title="Planificador de Guardias", layout="wide")
+st.set_page_config(page_title="Planificador de Guardias (MODO DIAGNÓSTICO)", layout="wide")
 
 # --- 2. CONEXIÓN A FIRESTORE ---
 @st.cache_resource
@@ -63,6 +63,8 @@ def limpiar_nulos(val):
 dias_espanol = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
 
 # --- 3. INICIALIZACIÓN DE SESIÓN ---
+st.info(f"🌐 Conectado al Proyecto Firebase: **{project_id}**")
+
 if 'ausencias_globales' not in st.session_state:
     datos_aus = cargar_coleccion("ausencias")
     st.session_state.ausencias_globales = {item["nombre"]: {datetime.strptime(f, '%Y-%m-%d') for f in item.get("fechas", [])} for item in datos_aus if "nombre" in item}
@@ -104,13 +106,29 @@ estilos_css = """
 """
 st.markdown(estilos_css, unsafe_allow_html=True)
 
-st.title("🏥 Planificador de Guardias")
+st.title("🏥 Planificador de Guardias (Modo Diagnóstico)")
 
 # --- 5. SIDEBAR ---
+st.sidebar.header("🛠️ 1. TEST DE CONEXIÓN")
+if st.sidebar.button("🟡 PULSAR PARA TESTEAR FIREBASE", type="primary"):
+    with st.spinner("Enviando dato de prueba a la nube..."):
+        try:
+            if db is None:
+                st.sidebar.error("❌ NO HAY CONEXIÓN A LA BASE DE DATOS.")
+            else:
+                db.collection("TEST_DIAGNOSTICO").document("prueba_123").set({"estado": "Conexion perfecta", "hora": str(datetime.now())})
+                doc = db.collection("TEST_DIAGNOSTICO").document("prueba_123").get()
+                if doc.exists:
+                    st.sidebar.success(f"✅ ¡FUNCIONA! Firestore responde correctamente en el proyecto '{project_id}'. Revisa si ves la carpeta 'TEST_DIAGNOSTICO' en tu Firebase.")
+                else:
+                    st.sidebar.error("❌ Fallo fantasma: No lanzó error pero no lee el documento.")
+        except Exception as e:
+            st.sidebar.error(f"❌ ERROR DE PERMISOS: {e}")
+
+st.sidebar.divider()
 st.sidebar.header("⚙️ Configuración")
 incluir_adjuntos = st.sidebar.checkbox("✅ Incluir Adjuntos en la planificación", value=True)
-forzar_manuales = st.sidebar.checkbox("⚠️ Permitir que manuales rompan reglas", value=False, help="Ignora topes o descansos SOLO para las guardias a mano.")
-st.sidebar.divider()
+forzar_manuales = st.sidebar.checkbox("⚠️ Permitir que manuales rompan reglas", value=False)
 
 try: conf_c = {"Color": st.column_config.ColorColumn("🎨 Color")}
 except: conf_c = {}
@@ -121,37 +139,30 @@ if incluir_adjuntos:
     if "Nombre" in df_adjuntos.columns:
         df_adjuntos = df_adjuntos.dropna(subset=["Nombre"]).drop_duplicates(subset=["Nombre"])
         ADJ_COLOR_MAP = {row["Nombre"]: row.get("Color", "#444444") for _, row in df_adjuntos.iterrows()}
-    else:
-        df_adjuntos = pd.DataFrame(columns=["Nombre", "Tope", "Color"]); ADJ_COLOR_MAP = {}
-else:
-    df_adjuntos = pd.DataFrame(); ADJ_COLOR_MAP = {}
+    else: df_adjuntos = pd.DataFrame(columns=["Nombre", "Tope", "Color"]); ADJ_COLOR_MAP = {}
+else: df_adjuntos = pd.DataFrame(); ADJ_COLOR_MAP = {}
 
 df_residentes = st.sidebar.data_editor(st.session_state.residentes_init, num_rows="dynamic", key="edit_res", column_config=conf_c)
 if "Nombre" in df_residentes.columns:
     df_residentes = df_residentes.dropna(subset=["Nombre"]).drop_duplicates(subset=["Nombre"])
     RES_COLOR_MAP = {row["Nombre"]: row.get("Color", "#FFFFFF") for _, row in df_residentes.iterrows()}
     USER_R_MAP = {row["Nombre"]: row.get("R", "") for _, row in df_residentes.iterrows()}
-else:
-    df_residentes = pd.DataFrame(columns=["Nombre", "Tope", "R", "Color"]); RES_COLOR_MAP = {}; USER_R_MAP = {}
+else: df_residentes = pd.DataFrame(columns=["Nombre", "Tope", "R", "Color"]); RES_COLOR_MAP = {}; USER_R_MAP = {}
 
-st.sidebar.header("📅 3. Periodo")
 mes_nombres = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
-col_a, col_b = st.sidebar.columns(2)
-mes_ini = col_a.selectbox("Inicio", range(1, 13), index=5, format_func=lambda x: mes_nombres[x-1])
-mes_fin = col_b.selectbox("Fin", range(1, 13), index=8, format_func=lambda x: mes_nombres[x-1])
+c1, c2 = st.sidebar.columns(2)
+mes_ini = c1.selectbox("Inicio", range(1, 13), index=5, format_func=lambda x: mes_nombres[x-1])
+mes_fin = c2.selectbox("Fin", range(1, 13), index=8, format_func=lambda x: mes_nombres[x-1])
 anio_sel = st.sidebar.number_input("Año", value=2026)
 rango_fechas = pd.date_range(datetime(anio_sel, mes_ini, 1), datetime(anio_sel, mes_fin, calendar.monthrange(anio_sel, mes_fin)[1]))
 
 st.sidebar.divider()
 with st.sidebar.expander("🚨 Zona de Peligro"):
-    st.warning("Borra de la nube todas las guardias fijadas.")
     if st.button("🗑️ Borrar TODAS", type="primary"):
         with st.spinner("Borrando historial..."):
             if db:
                 docs = db.collection("guardias_fijas").stream()
-                batch = db.batch()
-                for doc in docs: batch.delete(doc.reference)
-                batch.commit()
+                for doc in docs: doc.reference.delete()
             st.session_state.guardias_fijas = {}
         st.success("✅ Limpio."); st.rerun()
 
@@ -164,15 +175,11 @@ def generar_grilla(nombres, key_p):
 
 t1, t2, t3 = st.tabs(["👨‍⚕️ Ausencias Adjuntos", "🎓 Ausencias Residentes", "📝 Editor Manual de Guardias Fijas"])
 
-with t1:
-    if incluir_adjuntos: g_adj = generar_grilla(df_adjuntos["Nombre"].tolist(), "adj") if not df_adjuntos.empty else pd.DataFrame()
-    else: g_adj = pd.DataFrame()
-
-with t2:
-    g_res = generar_grilla(df_residentes["Nombre"].tolist(), "res") if not df_residentes.empty else pd.DataFrame()
+with t1: g_adj = generar_grilla(df_adjuntos["Nombre"].tolist(), "adj") if incluir_adjuntos and not df_adjuntos.empty else pd.DataFrame()
+with t2: g_res = generar_grilla(df_residentes["Nombre"].tolist(), "res") if not df_residentes.empty else pd.DataFrame()
 
 with t3:
-    st.info("💡 Edita lo que necesites y dale al botón azul de abajo.")
+    st.info("💡 Haz clic fuera de la celda tras editar un nombre y luego pulsa Guardar.")
     ops_adj = ["VACÍO"] + (df_adjuntos["Nombre"].tolist() if not df_adjuntos.empty else [])
     ops_res = ["VACÍO"] + (df_residentes["Nombre"].tolist() if not df_residentes.empty else [])
     
@@ -193,29 +200,23 @@ with t3:
             "Día": st.column_config.TextColumn("Día de la semana", disabled=True),
             "Adjunto": st.column_config.SelectboxColumn("Adjunto Fijo", options=ops_adj),
             "Residente": st.column_config.SelectboxColumn("Residente Fijo", options=ops_res)
-        }, key="editor_manual_final_fuerza_bruta"
+        }, key="editor_manual_diagnostico"
     )
 
 st.markdown("<br>", unsafe_allow_html=True)
 
-# -------------------------------------------------------------
-# BOTÓN DE FUERZA BRUTA (Aplaza Firebase con lo que hay en pantalla)
-# -------------------------------------------------------------
-if st.button("☁️ SINCRONIZAR Y GUARDAR TODO (Ausencias y Manuales)", type="primary", use_container_width=True):
+if st.button("☁️ SINCRONIZAR Y GUARDAR TODO", type="primary", use_container_width=True):
     exitos = 0
-    with st.spinner("Escribiendo datos en la nube..."):
+    chivato_datos = []
+    
+    with st.spinner("Escribiendo documento a documento en Firebase..."):
         try:
-            batch = db.batch() if db else None
-            
-            # 1. Guardar Plantillas
+            # 1 y 2. Guardar Plantillas y Ausencias
             if incluir_adjuntos and not df_adjuntos.empty:
-                for _, row in df_adjuntos.iterrows(): 
-                    if batch: batch.set(db.collection("plantilla_adjuntos").document(row["Nombre"]), {k: ("" if pd.isna(v) else v) for k, v in row.items()})
+                for _, row in df_adjuntos.iterrows(): db.collection("plantilla_adjuntos").document(row["Nombre"]).set({k: ("" if pd.isna(v) else v) for k, v in row.items()})
             if not df_residentes.empty:
-                for _, row in df_residentes.iterrows(): 
-                    if batch: batch.set(db.collection("plantilla_residentes").document(row["Nombre"]), {k: ("" if pd.isna(v) else v) for k, v in row.items()})
+                for _, row in df_residentes.iterrows(): db.collection("plantilla_residentes").document(row["Nombre"]).set({k: ("" if pd.isna(v) else v) for k, v in row.items()})
             
-            # 2. Guardar Ausencias
             listas_sync = []
             if not df_residentes.empty: listas_sync.append((g_res, df_residentes["Nombre"].tolist()))
             if incluir_adjuntos and not df_adjuntos.empty: listas_sync.append((g_adj, df_adjuntos["Nombre"].tolist()))
@@ -226,9 +227,9 @@ if st.button("☁️ SINCRONIZAR Y GUARDAR TODO (Ausencias y Manuales)", type="p
                     fuera = {d for d in st.session_state.ausencias_globales.get(nom, set()) if not (rango_fechas[0] <= d <= rango_fechas[-1])}
                     final = nuevas.union(fuera)
                     st.session_state.ausencias_globales[nom] = final
-                    if batch: batch.set(db.collection("ausencias").document(nom), {"nombre": nom, "fechas": [d.strftime('%Y-%m-%d') for d in final]})
+                    db.collection("ausencias").document(nom).set({"nombre": nom, "fechas": [d.strftime('%Y-%m-%d') for d in final]})
             
-            # 3. Guardar Manuales (FUERZA BRUTA)
+            # 3. Guardar Manuales (Documento a Documento, sin Batch)
             for _, row in df_manual_edit.iterrows():
                 f_str = row["Fecha"]
                 a_nom = limpiar_nulos(row["Adjunto"])
@@ -237,15 +238,18 @@ if st.button("☁️ SINCRONIZAR Y GUARDAR TODO (Ausencias y Manuales)", type="p
                 if a_nom != "VACÍO" or r_nom != "VACÍO":
                     data = {"Adjunto": a_nom, "Residente": r_nom}
                     st.session_state.guardias_fijas[f_str] = data
-                    if batch: batch.set(db.collection("guardias_fijas").document(f_str), data)
+                    if db: db.collection("guardias_fijas").document(f_str).set(data)
                     exitos += 1
+                    chivato_datos.append(f"{f_str[-5:]} ({r_nom})")
                 else:
                     if f_str in st.session_state.guardias_fijas:
                         del st.session_state.guardias_fijas[f_str]
-                    if batch: batch.delete(db.collection("guardias_fijas").document(f_str))
+                    if db: db.collection("guardias_fijas").document(f_str).delete()
             
-            if batch: batch.commit()
-            st.success(f"✅ ¡Guardado completado! Tienes {exitos} guardias fijadas en total en la nube.")
+            if exitos > 0:
+                st.success(f"✅ ¡Guardado! La aplicación intentó enviar {exitos} guardias fijas a Firebase. \n\n**Datos detectados:** {', '.join(chivato_datos)}")
+            else:
+                st.warning("⚠️ La aplicación cree que has guardado 0 guardias. (El programa está leyendo toda la tabla como 'VACÍO').")
             
         except Exception as e:
             st.error(f"❌ Error crítico al enviar a Firebase: {e}")
@@ -505,8 +509,7 @@ if st.session_state.plan_generado:
                     f_str = row["Fecha"]
                     data = {"Adjunto": row["Adjunto"], "Residente": row["Residente"]}
                     st.session_state.guardias_fijas[f_str] = data
-                    if batch: batch.set(db.collection("guardias_fijas").document(f_str), data)
-                if batch: batch.commit()
+                    if db: db.collection("guardias_fijas").document(f_str).set(data)
                 st.success(f"✅ Guardias de {mes_nombres[m-1]} fijadas. Ve al editor manual si necesitas hacer retoques.")
         st.markdown("<br><br>", unsafe_allow_html=True)
         
