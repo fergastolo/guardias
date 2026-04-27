@@ -54,11 +54,11 @@ def cargar_coleccion_dict(col_name):
     except: pass
     return res
 
-# FILTRO ANTI-NaN PARA FIREBASE
+# FILTRO ANTI-NULOS EXTREMO PARA FIREBASE
 def limpiar_nulos(val):
     if pd.isna(val) or val is None: return "VACÍO"
     s = str(val).strip()
-    if s in ["", "nan", "NaN", "None"]: return "VACÍO"
+    if s in ["", "nan", "NaN", "None", "<NA>"]: return "VACÍO"
     return s
 
 dias_espanol = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
@@ -153,7 +153,7 @@ if st.sidebar.button("🗑️ Borrar TODAS las Guardias Fijas", type="primary"):
             for doc in docs: batch.delete(doc.reference)
             batch.commit()
         st.session_state.guardias_fijas = {}
-    st.sidebar.success("✅ Base de datos limpia."); st.rerun()
+    st.sidebar.success("✅ Base de datos limpia. Si miras en Firebase, la carpeta habrá desaparecido (es normal)."); st.rerun()
 
 if st.sidebar.button("🔓 Desbloquear Solo Periodo Actual"):
     for d in rango_fechas:
@@ -180,7 +180,7 @@ with t2:
     g_res = generar_grilla(df_residentes["Nombre"].tolist(), "res") if not df_residentes.empty else pd.DataFrame()
 
 with t3:
-    st.info("💡 Asigna manualmente. Haz clic fuera de la celda antes de darle al botón de Guardar.")
+    st.info("💡 Haz clic fuera de la celda de la tabla tras elegir un nombre, y luego pulsa el botón de Guardar.")
     ops_adj = ["VACÍO"] + (df_adjuntos["Nombre"].tolist() if not df_adjuntos.empty else [])
     ops_res = ["VACÍO"] + (df_residentes["Nombre"].tolist() if not df_residentes.empty else [])
     
@@ -204,36 +204,12 @@ with t3:
         }, key="editor_manual"
     )
 
-# BOTÓN ÚNICO Y BLINDADO DE GUARDADO
-st.markdown("<br>", unsafe_allow_html=True)
-if st.button("☁️ SINCRONIZAR Y GUARDAR TODO (Ausencias, Plantillas y Manuales)", type="primary", use_container_width=True):
-    with st.spinner("Desinfectando datos y guardando en la nube..."):
-        try:
+    # BOTÓN DE GUARDADO ESPECÍFICO PARA EL EDITOR MANUAL
+    if st.button("💾 GUARDAR ASIGNACIONES MANUALES", type="primary", use_container_width=True):
+        with st.spinner("Subiendo a la nube..."):
             batch = db.batch() if db else None
+            contador_guardadas = 0
             
-            # 1. Guardar Plantillas (Limpiando nulos)
-            if incluir_adjuntos and not df_adjuntos.empty:
-                for _, row in df_adjuntos.iterrows(): 
-                    if batch: batch.set(db.collection("plantilla_adjuntos").document(row["Nombre"]), {k: ("" if pd.isna(v) else v) for k, v in row.items()})
-            if not df_residentes.empty:
-                for _, row in df_residentes.iterrows(): 
-                    if batch: batch.set(db.collection("plantilla_residentes").document(row["Nombre"]), {k: ("" if pd.isna(v) else v) for k, v in row.items()})
-            
-            # 2. Guardar Ausencias
-            listas_sync = []
-            if not df_residentes.empty: listas_sync.append((g_res, df_residentes["Nombre"].tolist()))
-            if incluir_adjuntos and not df_adjuntos.empty: listas_sync.append((g_adj, df_adjuntos["Nombre"].tolist()))
-            
-            for g, nombres in listas_sync:
-                for nom in nombres:
-                    if not nom: continue
-                    nuevas = {rango_fechas[i] for i, v in enumerate(g.loc[nom]) if v}
-                    fuera = {d for d in st.session_state.ausencias_globales.get(nom, set()) if not (rango_fechas[0] <= d <= rango_fechas[-1])}
-                    final = nuevas.union(fuera)
-                    st.session_state.ausencias_globales[nom] = final
-                    if batch: batch.set(db.collection("ausencias").document(nom), {"nombre": nom, "fechas": [d.strftime('%Y-%m-%d') for d in final]})
-            
-            # 3. Guardar Manuales (El blindaje anti-NaN)
             for _, row in df_manual_edit.iterrows():
                 f_str = row["Fecha"]
                 a_nom = limpiar_nulos(row["Adjunto"])
@@ -243,17 +219,44 @@ if st.button("☁️ SINCRONIZAR Y GUARDAR TODO (Ausencias, Plantillas y Manuale
                     data = {"Adjunto": a_nom, "Residente": r_nom}
                     st.session_state.guardias_fijas[f_str] = data
                     if batch: batch.set(db.collection("guardias_fijas").document(f_str), data)
+                    contador_guardadas += 1
                 else:
                     if f_str in st.session_state.guardias_fijas:
                         del st.session_state.guardias_fijas[f_str]
                         if batch: batch.delete(db.collection("guardias_fijas").document(f_str))
             
             if batch: batch.commit()
-            st.success("✅ ¡Éxito absoluto! Guardias manuales fijadas en la base de datos.")
-            st.rerun()
             
-        except Exception as e:
-            st.error(f"❌ Error crítico al enviar a Firebase: {e}")
+        st.success(f"✅ ¡Guardado completado! Se han registrado {contador_guardadas} guardias fijas en la nube. Ya puedes comprobar Firebase.")
+        st.rerun()
+
+st.markdown("<br>", unsafe_allow_html=True)
+if st.button("☁️ Sincronizar Plantillas y Ausencias", use_container_width=True):
+    with st.spinner("Guardando..."):
+        batch = db.batch() if db else None
+        if incluir_adjuntos and not df_adjuntos.empty:
+            for _, row in df_adjuntos.iterrows(): 
+                if batch: batch.set(db.collection("plantilla_adjuntos").document(row["Nombre"]), {k: ("" if pd.isna(v) else v) for k, v in row.items()})
+        if not df_residentes.empty:
+            for _, row in df_residentes.iterrows(): 
+                if batch: batch.set(db.collection("plantilla_residentes").document(row["Nombre"]), {k: ("" if pd.isna(v) else v) for k, v in row.items()})
+        
+        listas_sync = []
+        if not df_residentes.empty: listas_sync.append((g_res, df_residentes["Nombre"].tolist()))
+        if incluir_adjuntos and not df_adjuntos.empty: listas_sync.append((g_adj, df_adjuntos["Nombre"].tolist()))
+        
+        for g, nombres in listas_sync:
+            for nom in nombres:
+                if not nom: continue
+                nuevas = {rango_fechas[i] for i, v in enumerate(g.loc[nom]) if v}
+                fuera = {d for d in st.session_state.ausencias_globales.get(nom, set()) if not (rango_fechas[0] <= d <= rango_fechas[-1])}
+                final = nuevas.union(fuera)
+                st.session_state.ausencias_globales[nom] = final
+                if batch: batch.set(db.collection("ausencias").document(nom), {"nombre": nom, "fechas": [d.strftime('%Y-%m-%d') for d in final]})
+        
+        if batch: batch.commit()
+        st.success("✅ Plantillas y ausencias sincronizadas."); st.rerun()
+
 
 # --- FUNCIÓN DETECTIVE DE CONFLICTOS ---
 def diagnosticar_conflictos():
