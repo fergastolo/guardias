@@ -132,18 +132,39 @@ mes_fin = c2.selectbox("Fin", range(1, 13), index=8, format_func=lambda x: mes_n
 anio_sel = st.sidebar.number_input("Año", value=2026)
 rango_fechas = pd.date_range(datetime(anio_sel, mes_ini, 1), datetime(anio_sel, mes_fin, calendar.monthrange(anio_sel, mes_fin)[1]))
 
-# --- 6. EDITOR MANUAL Y TABS ---
-t1, t2, t3 = st.tabs(["📅 Ausencias Adjuntos", "🎓 Ausencias Residentes", "✍️ EDITOR MANUAL (Guardias Fijas)"])
+st.sidebar.divider()
+st.sidebar.header("🚨 Limpieza de Base de Datos")
+if st.sidebar.button("🗑️ Borrar TODAS las Guardias Fijas", type="primary"):
+    with st.spinner("Borrando historial de la base de datos..."):
+        if db:
+            docs = db.collection("guardias_fijas").stream()
+            batch = db.batch()
+            for doc in docs: batch.delete(doc.reference)
+            batch.commit()
+        st.session_state.guardias_fijas = {}
+    st.sidebar.success("✅ Base de datos limpia."); st.rerun()
 
+if st.sidebar.button("🔓 Desbloquear Solo Periodo Actual"):
+    for d in rango_fechas:
+        f_str = d.strftime('%Y-%m-%d')
+        if f_str in st.session_state.guardias_fijas:
+            if db: db.collection("guardias_fijas").document(f_str).delete()
+            del st.session_state.guardias_fijas[f_str]
+    st.rerun()
+
+# --- 6. AUSENCIAS Y EDITOR MANUAL ---
+st.subheader("📅 Grilla de Ausencias y Editor Manual")
 def generar_grilla(nombres, key_p):
     grid_data = {d.strftime('%d/%m'): [bool(d in st.session_state.ausencias_globales.get(n, set())) for n in nombres] for d in rango_fechas}
     return st.data_editor(pd.DataFrame(grid_data, index=nombres).astype(bool), use_container_width=True, key=f"g_{key_p}")
+
+t1, t2, t3 = st.tabs(["📅 Ausencias Adjuntos", "🎓 Ausencias Residentes", "✍️ EDITOR MANUAL (Guardias Fijas)"])
 
 with t1: g_adj = generar_grilla(df_adjuntos["Nombre"].tolist(), "adj") if incluir_adjuntos and not df_adjuntos.empty else pd.DataFrame()
 with t2: g_res = generar_grilla(df_residentes["Nombre"].tolist(), "res") if not df_residentes.empty else pd.DataFrame()
 
 with t3:
-    st.info("💡 Haz clic en el fondo blanco de la página tras editar y luego pulsa Guardar.")
+    st.warning("⚠️ RECUERDA: Tras elegir un nombre, haz clic en el fondo blanco de la página antes de pulsar Guardar.")
     ops_adj = ["VACÍO"] + df_adjuntos["Nombre"].tolist() if not df_adjuntos.empty else ["VACÍO"]
     ops_res = ["VACÍO"] + df_residentes["Nombre"].tolist() if not df_residentes.empty else ["VACÍO"]
     
@@ -166,40 +187,24 @@ with t3:
         }, key="editor_manual_final"
     )
 
-    if st.button("💾 GUARDAR CAMBIOS MANUALES", type="primary", use_container_width=True):
-        exitos = 0
-        with st.spinner("Conectando con Firebase..."):
-            for _, row in df_manual_edit.iterrows():
-                f_str = row["Fecha"]
-                a_nom = limpiar_nulos(row["Adjunto"])
-                r_nom = limpiar_nulos(row["Residente"])
-                
-                try:
-                    if a_nom != "VACÍO" or r_nom != "VACÍO":
-                        data = {"Adjunto": a_nom, "Residente": r_nom}
-                        if db: db.collection("guardias_fijas").document(f_str).set(data)
-                        st.session_state.guardias_fijas[f_str] = data
-                    else:
-                        if f_str in st.session_state.guardias_fijas:
-                            if db: db.collection("guardias_fijas").document(f_str).delete()
-                            del st.session_state.guardias_fijas[f_str]
-                    exitos += 1
-                except Exception as e: st.error(f"❌ Error al guardar el día {f_str}: {e}")
-        st.success(f"✅ ¡PROCESO COMPLETADO! Se han sincronizado {exitos} días con la nube.")
-        st.rerun()
-
-st.divider()
-if st.button("☁️ Sincronizar Plantillas y Ausencias", use_container_width=True):
-    with st.spinner("Sincronizando ausencias..."):
-        if incluir_adjuntos and not df_adjuntos.empty:
-            for _, row in df_adjuntos.iterrows(): db.collection("plantilla_adjuntos").document(row["Nombre"]).set(row.to_dict())
-        if not df_residentes.empty:
-            for _, row in df_residentes.iterrows(): db.collection("plantilla_residentes").document(row["Nombre"]).set(row.to_dict())
+st.markdown("<br>", unsafe_allow_html=True)
+if st.button("☁️ SINCRONIZAR Y GUARDAR TODO (Plantillas, Ausencias y Manuales)", type="primary", use_container_width=True):
+    exitos = 0
+    with st.spinner("Sincronizando de forma segura con Firebase..."):
+        batch = db.batch() if db else None
         
+        # Plantillas
+        if incluir_adjuntos and not df_adjuntos.empty:
+            for _, row in df_adjuntos.iterrows(): 
+                if batch: batch.set(db.collection("plantilla_adjuntos").document(row["Nombre"]), {k: ("" if pd.isna(v) else v) for k, v in row.items()})
+        if not df_residentes.empty:
+            for _, row in df_residentes.iterrows(): 
+                if batch: batch.set(db.collection("plantilla_residentes").document(row["Nombre"]), {k: ("" if pd.isna(v) else v) for k, v in row.items()})
+        
+        # Ausencias
         listas_sync = []
         if not df_residentes.empty: listas_sync.append((g_res, df_residentes["Nombre"].tolist()))
         if incluir_adjuntos and not df_adjuntos.empty: listas_sync.append((g_adj, df_adjuntos["Nombre"].tolist()))
-        
         for g, nombres in listas_sync:
             for nom in nombres:
                 if not nom: continue
@@ -207,18 +212,34 @@ if st.button("☁️ Sincronizar Plantillas y Ausencias", use_container_width=Tr
                 fuera = {d for d in st.session_state.ausencias_globales.get(nom, set()) if not (rango_fechas[0] <= d <= rango_fechas[-1])}
                 final = nuevas.union(fuera)
                 st.session_state.ausencias_globales[nom] = final
-                if db: db.collection("ausencias").document(nom).set({"nombre": nom, "fechas": [d.strftime('%Y-%m-%d') for d in final]})
-        st.success("✅ Ausencias y Plantillas sincronizadas.")
-        st.rerun()
+                if batch: batch.set(db.collection("ausencias").document(nom), {"nombre": nom, "fechas": [d.strftime('%Y-%m-%d') for d in final]})
 
-# --- FUNCIÓN DETECTIVE DE CONFLICTOS ---
+        # Manuales
+        for _, row in df_manual_edit.iterrows():
+            f_str = row["Fecha"]
+            a_nom = limpiar_nulos(row["Adjunto"])
+            r_nom = limpiar_nulos(row["Residente"])
+            
+            if a_nom != "VACÍO" or r_nom != "VACÍO":
+                data = {"Adjunto": a_nom, "Residente": r_nom}
+                if batch: batch.set(db.collection("guardias_fijas").document(f_str), data)
+                st.session_state.guardias_fijas[f_str] = data
+                exitos += 1
+            else:
+                if f_str in st.session_state.guardias_fijas:
+                    if batch: batch.delete(db.collection("guardias_fijas").document(f_str))
+                    del st.session_state.guardias_fijas[f_str]
+        
+        if batch: batch.commit()
+    st.success(f"✅ ¡Completado! {exitos} guardias fijadas y guardadas.")
+    st.rerun()
+
+# --- 7. DETECTIVE DE CONFLICTOS ---
 def diagnosticar_conflictos():
     errores = []
     n_dias = len(rango_fechas)
     def obtener_disponibles(dia_idx, df_staff, is_adj, exclude_nom):
-        disponibles = []
-        d_date = rango_fechas[dia_idx]
-        rol_k = "Adjunto" if is_adj else "Residente"
+        disponibles = []; d_date = rango_fechas[dia_idx]; rol_k = "Adjunto" if is_adj else "Residente"
         for _, r in df_staff.iterrows():
             nom = r["Nombre"]
             if nom == exclude_nom: continue
@@ -268,16 +289,16 @@ def diagnosticar_conflictos():
                 wd = rango_fechas[i].weekday()
                 if wd == 5 and i + 5 in dias_idx:
                     sug_sab = obtener_disponibles(i, df_staff, is_adj, nom)
-                    errores.append(f"**{nom}** fijado el Sáb {rango_fechas[i].strftime('%d/%m')} y Jue {rango_fechas[i+5].strftime('%d/%m')}.\n💡 Sugerencias para cambiar Sábado: {', '.join(sug_sab)}")
+                    errores.append(f"**{nom}** fijado el Sáb {rango_fechas[i].strftime('%d/%m')} y Jue {rango_fechas[i+5].strftime('%d/%m')}.\n💡 Sugerencias Sábado: {', '.join(sug_sab)}")
                 if wd == 3 and i + 2 in dias_idx:
                     sug_jue = obtener_disponibles(i, df_staff, is_adj, nom)
-                    errores.append(f"**{nom}** fijado el Jue {rango_fechas[i].strftime('%d/%m')} y Sáb {rango_fechas[i+2].strftime('%d/%m')}.\n💡 Sugerencias para cambiar Jueves: {', '.join(sug_jue)}")
+                    errores.append(f"**{nom}** fijado el Jue {rango_fechas[i].strftime('%d/%m')} y Sáb {rango_fechas[i+2].strftime('%d/%m')}.\n💡 Sugerencias Jueves: {', '.join(sug_jue)}")
                 if not is_adj and wd == 4 and i + 2 < n_dias:
                     f2_str = rango_fechas[i+2].strftime('%Y-%m-%d')
                     fijo_dom = st.session_state.guardias_fijas.get(f2_str, {}).get(rol)
                     if fijo_dom and fijo_dom != "VACÍO" and fijo_dom != nom:
                         sug_vie = obtener_disponibles(i, df_staff, is_adj, nom)
-                        errores.append(f"**{nom}** hace Viernes {rango_fechas[i].strftime('%d/%m')}, pero Domingo es de **{fijo_dom}**.\n💡 Sugerencias para el Viernes: {', '.join(sug_vie)}")
+                        errores.append(f"**{nom}** hace Viernes {rango_fechas[i].strftime('%d/%m')}, pero Domingo es de **{fijo_dom}**.\n💡 Sugerencias Viernes: {', '.join(sug_vie)}")
     return list(set(errores))
 
 # --- 8. MOTOR DE RESOLUCIÓN ---
@@ -291,7 +312,6 @@ def resolver():
             fijo = st.session_state.guardias_fijas.get(f_str)
             model.Add(sum(v[(r, d)] for r in range(n)) <= 1)
             
-            # ¡AQUÍ ESTABA EL BUG! Ahora, si es VACÍO, la IA es libre de calcular.
             if fijo:
                 val = fijo.get("Adjunto") if es_adj else fijo.get("Residente")
                 if pd.notna(val) and val != "VACÍO":
@@ -403,9 +423,22 @@ if st.button("CALCULAR PLANIFICACIÓN", type="primary", use_container_width=True
 
 if st.session_state.plan_generado:
     d = st.session_state.plan_generado
-    for m in d["meses"]: st.write(render_mes_html(d["df"], m, d["adj"]), unsafe_allow_html=True)
+    
+    # BUCLE SEGURO DE EXTRACCIÓN (BLINDAJE ANTI KEYERROR)
+    meses_a_renderizar = d.get("meses", [])
+    modo_adj_render = d.get("adj", True)
+    
+    for m in meses_a_renderizar: 
+        st.write(render_mes_html(d["df"], m, modo_adj_render), unsafe_allow_html=True)
+        
     st.divider()
-    if d["adj"] and d["t_adj"] is not None and not d["t_adj"].empty:
-        st.subheader("👨‍⚕️ Resumen Adjuntos"); st.dataframe(d["t_adj"].style.format(precision=0), use_container_width=True)
-    if d["t_res"] is not None and not d["t_res"].empty:
-        st.subheader("🎓 Resumen Residentes"); st.dataframe(d["t_res"].style.format(precision=0), use_container_width=True)
+    
+    t_adj = d.get("t_adj")
+    if modo_adj_render and t_adj is not None and not t_adj.empty:
+        st.subheader("👨‍⚕️ Resumen Adjuntos")
+        st.dataframe(t_adj.style.format(precision=0), use_container_width=True)
+        
+    t_res = d.get("t_res")
+    if t_res is not None and not t_res.empty:
+        st.subheader("🎓 Resumen Residentes")
+        st.dataframe(t_res.style.format(precision=0), use_container_width=True)
