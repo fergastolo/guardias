@@ -252,11 +252,16 @@ if st.button("☁️ SINCRONIZAR Y GUARDAR TODO (Plantillas, Ausencias y Manuale
 def diagnosticar_conflictos():
     errores = []
     n_dias = len(rango_fechas)
+    
     def obtener_disponibles(dia_idx, df_staff, is_adj, exclude_nom):
-        disponibles = []; d_date = rango_fechas[dia_idx]; rol_k = "Adjunto" if is_adj else "Residente"
+        disponibles = []
+        d_date = rango_fechas[dia_idx]
+        rol_k = "Adjunto" if is_adj else "Residente"
         for _, r in df_staff.iterrows():
-            nom = r["Nombre"]; if nom == exclude_nom: continue
+            nom = r["Nombre"]
+            if nom == exclude_nom: continue
             if d_date in st.session_state.ausencias_globales.get(nom, set()): continue
+            
             f_antes = st.session_state.guardias_fijas.get(rango_fechas[dia_idx-1].strftime('%Y-%m-%d'), {}) if dia_idx > 0 else {}
             f_despues = st.session_state.guardias_fijas.get(rango_fechas[dia_idx+1].strftime('%Y-%m-%d'), {}) if dia_idx < n_dias-1 else {}
             if f_antes.get(rol_k) == nom or f_despues.get(rol_k) == nom: continue
@@ -278,8 +283,10 @@ def diagnosticar_conflictos():
                     
             mes_actual = d_date.month
             guardias_este_mes = sum(1 for d in range(n_dias) if rango_fechas[d].month == mes_actual and st.session_state.guardias_fijas.get(rango_fechas[d].strftime('%Y-%m-%d'), {}).get(rol_k) == nom)
-            if guardias_este_mes >= r["Tope"]: disponibles.append(f"{nom} (⚠️ Excede tope)") 
-            else: disponibles.append(nom)
+            if guardias_este_mes >= r["Tope"]: 
+                disponibles.append(f"{nom} (⚠️ Excede tope)") 
+            else: 
+                disponibles.append(nom)
         return disponibles[:4]
 
     for df_staff, is_adj, rol in [(df_adjuntos, True, "Adjunto"), (df_residentes, False, "Residente")]:
@@ -287,9 +294,11 @@ def diagnosticar_conflictos():
         if df_staff.empty: continue
 
         for _, row in df_staff.iterrows():
-            nom = row["Nombre"]; dias_idx = []
+            nom = row["Nombre"]
+            dias_idx = []
             for d in range(n_dias):
-                f_str = rango_fechas[d].strftime('%Y-%m-%d'); fijo = st.session_state.guardias_fijas.get(f_str, {})
+                f_str = rango_fechas[d].strftime('%Y-%m-%d')
+                fijo = st.session_state.guardias_fijas.get(f_str, {})
                 if fijo.get(rol) == nom:
                     dias_idx.append(d)
                     if rango_fechas[d] in st.session_state.ausencias_globales.get(nom, set()):
@@ -298,22 +307,27 @@ def diagnosticar_conflictos():
 
             for i in dias_idx:
                 if i + 1 in dias_idx:
-                    sug1 = obtener_disponibles(i, df_staff, is_adj, nom); sug2 = obtener_disponibles(i+1, df_staff, is_adj, nom)
+                    sug1 = obtener_disponibles(i, df_staff, is_adj, nom)
+                    sug2 = obtener_disponibles(i+1, df_staff, is_adj, nom)
                     errores.append(f"**{nom}** tiene fijado {rango_fechas[i].strftime('%d/%m')} y {rango_fechas[i+1].strftime('%d/%m')} (Consecutivos).\n* 💡 Sustitutos día 1: {', '.join(sug1) if sug1 else 'Nadie'} | Día 2: {', '.join(sug2) if sug2 else 'Nadie'}.")
                 
                 wd = rango_fechas[i].weekday()
                 if wd == 5 and i + 5 in dias_idx:
-                    sug_sab = obtener_disponibles(i, df_staff, is_adj, nom); sug_jue = obtener_disponibles(i+5, df_staff, is_adj, nom)
+                    sug_sab = obtener_disponibles(i, df_staff, is_adj, nom)
+                    sug_jue = obtener_disponibles(i+5, df_staff, is_adj, nom)
                     errores.append(f"**{nom}** fijado Sáb {rango_fechas[i].strftime('%d/%m')} y Jue {rango_fechas[i+5].strftime('%d/%m')}.\n* 💡 Opciones Sábado: {', '.join(sug_sab) if sug_sab else 'Nadie'} | Jueves: {', '.join(sug_jue) if sug_jue else 'Nadie'}")
                 
                 if wd == 3 and i + 2 in dias_idx:
-                    sug_jue = obtener_disponibles(i, df_staff, is_adj, nom); sug_sab = obtener_disponibles(i+2, df_staff, is_adj, nom)
+                    sug_jue = obtener_disponibles(i, df_staff, is_adj, nom)
+                    sug_sab = obtener_disponibles(i+2, df_staff, is_adj, nom)
                     errores.append(f"**{nom}** fijado Jue {rango_fechas[i].strftime('%d/%m')} y Sáb {rango_fechas[i+2].strftime('%d/%m')}.\n* 💡 Opciones Jueves: {', '.join(sug_jue) if sug_jue else 'Nadie'} | Sábado: {', '.join(sug_sab) if sug_sab else 'Nadie'}")
 
                 if not is_adj and wd == 4 and i + 2 < n_dias:
-                    f2_str = rango_fechas[i+2].strftime('%Y-%m-%d'); fijo_dom = st.session_state.guardias_fijas.get(f2_str, {}).get(rol)
+                    f2_str = rango_fechas[i+2].strftime('%Y-%m-%d')
+                    fijo_dom = st.session_state.guardias_fijas.get(f2_str, {}).get(rol)
                     if fijo_dom and fijo_dom != "VACÍO" and fijo_dom != nom:
-                        sug_vie = obtener_disponibles(i, df_staff, is_adj, nom); sug_dom = obtener_disponibles(i+2, df_staff, is_adj, fijo_dom)
+                        sug_vie = obtener_disponibles(i, df_staff, is_adj, nom)
+                        sug_dom = obtener_disponibles(i+2, df_staff, is_adj, fijo_dom)
                         errores.append(f"**{nom}** hace Viernes {rango_fechas[i].strftime('%d/%m')}, pero Domingo es de **{fijo_dom}**.\n* 💡 Opciones Viernes: {', '.join(sug_vie) if sug_vie else 'Nadie'} | Domingo: {', '.join(sug_dom) if sug_dom else 'Nadie'}")
     return list(set(errores))
 
@@ -341,11 +355,11 @@ def resolver():
                 nom = staff.iloc[r]["Nombre"]
                 fijo_d = (fijo.get(rol_k) == nom) if fijo else False
                 
-                # 1. Ausencias: Si fuerzo a alguien ausente, la IA traga.
+                # 1. Ausencias
                 if rango_fechas[d] in st.session_state.ausencias_globales.get(nom, set()): 
                     if not (forzar_manuales and fijo_d): model.Add(v[(r, d)] == 0)
                 
-                # 2. Consecutivos: Solo salta la regla si NO he forzado los dos días
+                # 2. Consecutivos
                 if d < n_dias - 1:
                     fijo_d1 = st.session_state.guardias_fijas.get(rango_fechas[d+1].strftime('%Y-%m-%d'), {}).get(rol_k) == nom
                     if not (forzar_manuales and fijo_d and fijo_d1): model.Add(v[(r, d)] + v[(r, d+1)] <= 1)
