@@ -45,6 +45,15 @@ def cargar_coleccion(col_name):
     except: pass
     return resultados
 
+def cargar_coleccion_dict(col_name):
+    res = {}
+    if db is None: return res
+    try:
+        docs = db.collection(col_name).stream()
+        for doc in docs: res[doc.id] = doc.to_dict()
+    except: pass
+    return res
+
 # --- 3. INICIALIZACIÓN DE DATOS ---
 if 'ausencias_globales' not in st.session_state:
     datos_aus = cargar_coleccion("ausencias")
@@ -60,6 +69,10 @@ if 'adjuntos_init' not in st.session_state:
 if 'residentes_init' not in st.session_state:
     db_res = cargar_coleccion("plantilla_residentes")
     st.session_state.residentes_init = pd.DataFrame(db_res) if db_res else pd.DataFrame([{"Nombre": "Daniela", "Tope": 6, "R": "R4", "Color": "#FFC1CC"}])
+
+# Nueva base de datos para guardias fijadas (con candado)
+if 'guardias_fijas' not in st.session_state:
+    st.session_state.guardias_fijas = cargar_coleccion_dict("guardias_fijas")
 
 if 'plan_generado' not in st.session_state:
     st.session_state.plan_generado = None
@@ -83,26 +96,19 @@ st.markdown(estilos_css, unsafe_allow_html=True)
 
 st.title("🏥 Planificador de Guardias")
 
-# --- 5. SIDEBAR (CON FILTRO DE DUPLICADOS Y TOGGLE) ---
-st.sidebar.header("⚙️ Configuración")
-incluir_adjuntos = st.sidebar.checkbox("✅ Incluir Adjuntos en la planificación", value=True)
-st.sidebar.divider()
-
+# --- 5. SIDEBAR ---
 try: conf_c = {"Color": st.column_config.ColorColumn("🎨 Color")}
 except: conf_c = {}
 
-if incluir_adjuntos:
-    st.sidebar.header("👨‍⚕️ 1. Plantilla Adjuntos")
-    df_adjuntos = st.sidebar.data_editor(st.session_state.adjuntos_init, num_rows="dynamic", key="edit_adj", column_config=conf_c)
-    df_adjuntos = df_adjuntos.dropna(subset=["Nombre"]).drop_duplicates(subset=["Nombre"])
-    ADJ_COLOR_MAP = {row["Nombre"]: row["Color"] for _, row in df_adjuntos.iterrows()}
-else:
-    df_adjuntos = pd.DataFrame()
-    ADJ_COLOR_MAP = {}
+st.sidebar.header("👨‍⚕️ 1. Plantilla Adjuntos")
+df_adjuntos = st.sidebar.data_editor(st.session_state.adjuntos_init, num_rows="dynamic", key="edit_adj", column_config=conf_c)
+df_adjuntos = df_adjuntos.dropna(subset=["Nombre"]).drop_duplicates(subset=["Nombre"])
 
 st.sidebar.header("🎓 2. Plantilla Residentes")
 df_residentes = st.sidebar.data_editor(st.session_state.residentes_init, num_rows="dynamic", key="edit_res", column_config=conf_c)
 df_residentes = df_residentes.dropna(subset=["Nombre"]).drop_duplicates(subset=["Nombre"])
+
+ADJ_COLOR_MAP = {row["Nombre"]: row["Color"] for _, row in df_adjuntos.iterrows()}
 RES_COLOR_MAP = {row["Nombre"]: row["Color"] for _, row in df_residentes.iterrows()}
 USER_R_MAP = {row["Nombre"]: row["R"] for _, row in df_residentes.iterrows() if "R" in row}
 
@@ -117,7 +123,23 @@ primer_dia = datetime(anio_sel, mes_ini, 1)
 ultimo_dia = datetime(anio_sel, mes_fin, calendar.monthrange(anio_sel, mes_fin)[1])
 rango_fechas = pd.date_range(primer_dia, ultimo_dia)
 
-# --- 6. AUSENCIAS (GRILLA REFORZADA ANTI-TYPEERROR) ---
+# --- BOTÓN PARA DESBLOQUEAR PERIODOS ---
+st.sidebar.divider()
+st.sidebar.header("🔒 Bloqueo de Guardias")
+st.sidebar.info("Para mantener el balance al calcular meses nuevos, las guardias fijadas actúan como base histórica.")
+if st.sidebar.button("🔓 Desbloquear Periodo Actual"):
+    with st.spinner("Borrando fijos del periodo..."):
+        batch = db.batch() if db else None
+        for d in rango_fechas:
+            f_str = d.strftime('%Y-%m-%d')
+            if f_str in st.session_state.guardias_fijas:
+                if batch: batch.delete(db.collection("guardias_fijas").document(f_str))
+                del st.session_state.guardias_fijas[f_str]
+        if batch: batch.commit()
+        st.sidebar.success("✅ Periodo desbloqueado.")
+        st.rerun()
+
+# --- 6. AUSENCIAS ---
 st.subheader("📅 Grilla de Ausencias")
 
 def generar_grilla(nombres, key_p):
@@ -127,7 +149,6 @@ def generar_grilla(nombres, key_p):
         grid_data[col_name] = [bool(d in st.session_state.ausencias_globales.get(n, set())) for n in nombres]
     
     df_grid = pd.DataFrame(grid_data, index=nombres).astype(bool)
-    
     return st.data_editor(
         df_grid, 
         use_container_width=True, 
@@ -135,27 +156,16 @@ def generar_grilla(nombres, key_p):
         column_config={c: st.column_config.CheckboxColumn(c) for c in grid_data.keys()}
     )
 
-if incluir_adjuntos:
-    t1, t2 = st.tabs(["👨‍⚕️ Adjuntos", "🎓 Residentes"])
-    with t1: g_adj = generar_grilla(df_adjuntos["Nombre"].tolist(), "adj")
-    with t2: g_res = generar_grilla(df_residentes["Nombre"].tolist(), "res")
-else:
-    g_adj = pd.DataFrame()
-    g_res = generar_grilla(df_residentes["Nombre"].tolist(), "res")
+t1, t2 = st.tabs(["👨‍⚕️ Adjuntos", "🎓 Residentes"])
+with t1: g_adj = generar_grilla(df_adjuntos["Nombre"].tolist(), "adj")
+with t2: g_res = generar_grilla(df_residentes["Nombre"].tolist(), "res")
 
 if st.button("☁️ Sincronizar y Guardar TODO"):
     with st.spinner("Limpiando y Guardando..."):
-        if incluir_adjuntos:
-            for _, row in df_adjuntos.iterrows():
-                db.collection("plantilla_adjuntos").document(row["Nombre"]).set(row.to_dict())
-        for _, row in df_residentes.iterrows():
-            db.collection("plantilla_residentes").document(row["Nombre"]).set(row.to_dict())
+        for _, row in df_adjuntos.iterrows(): db.collection("plantilla_adjuntos").document(row["Nombre"]).set(row.to_dict())
+        for _, row in df_residentes.iterrows(): db.collection("plantilla_residentes").document(row["Nombre"]).set(row.to_dict())
         
-        listas_sync = [(g_res, df_residentes["Nombre"].tolist())]
-        if incluir_adjuntos:
-            listas_sync.append((g_adj, df_adjuntos["Nombre"].tolist()))
-
-        for g, nombres in listas_sync:
+        for g, nombres in [(g_adj, df_adjuntos["Nombre"].tolist()), (g_res, df_residentes["Nombre"].tolist())]:
             for nom in nombres:
                 if not nom: continue
                 row_data = g.loc[nom]
@@ -168,15 +178,29 @@ if st.button("☁️ Sincronizar y Guardar TODO"):
         st.success("✅ ¡Datos limpios y guardados!")
         st.rerun()
 
-# --- 7. MOTOR ---
+# --- 7. MOTOR CON RESPETO A LOS FIJOS ---
 def resolver():
     model = cp_model.CpModel()
     num_dias = len(rango_fechas)
     def aplicar_reglas(staff, prefix, es_adj):
         n = len(staff); v = {(r, d): model.NewBoolVar(f'{prefix}_r{r}d{d}') for r in range(n) for d in range(num_dias)}
         for d in range(num_dias):
+            f_str = rango_fechas[d].strftime('%Y-%m-%d')
+            fijo = st.session_state.guardias_fijas.get(f_str)
+
             if es_adj: model.Add(sum(v[(r, d)] for r in range(n)) == 1)
             else: model.Add(sum(v[(r, d)] for r in range(n)) <= 1)
+            
+            # Si la fecha está bloqueada, obligamos a la IA a respetar la asignación
+            if fijo:
+                val_fijo = fijo.get("Adjunto") if es_adj else fijo.get("Residente")
+                if pd.notna(val_fijo):
+                    if val_fijo == "VACÍO":
+                        for r in range(n): model.Add(v[(r, d)] == 0)
+                    else:
+                        for r in range(n):
+                            if staff.iloc[r]["Nombre"] == val_fijo: model.Add(v[(r, d)] == 1)
+
             for r in range(n):
                 nom = staff.iloc[r]["Nombre"]
                 if rango_fechas[d] in st.session_state.ausencias_globales.get(nom, set()): model.Add(v[(r, d)] == 0)
@@ -200,12 +224,8 @@ def resolver():
             pb = 100000 if wd == 4 else (101000 if wd == 1 else (102000 if wd == 2 else 110000))
             for r in range(n): objs.append(v[(r, d)] * (pb + random.randint(1, 999)))
         return v, objs
-    
-    if incluir_adjuntos:
-        v_adj, o_adj = aplicar_reglas(df_adjuntos, "adj", True)
-    else:
-        v_adj, o_adj = {}, []
-        
+
+    v_adj, o_adj = aplicar_reglas(df_adjuntos, "adj", True)
     v_res, o_res = aplicar_reglas(df_residentes, "res", False)
     model.Maximize(sum(o_adj) + sum(o_res))
     solver = cp_model.CpSolver()
@@ -213,9 +233,8 @@ def resolver():
         res = []
         for d in range(num_dias):
             an, rn = "VACÍO", "VACÍO"
-            if incluir_adjuntos:
-                for r in range(len(df_adjuntos)):
-                    if solver.Value(v_adj[(r, d)]) == 1: an = df_adjuntos.iloc[r]["Nombre"]
+            for r in range(len(df_adjuntos)):
+                if solver.Value(v_adj[(r, d)]) == 1: an = df_adjuntos.iloc[r]["Nombre"]
             for r in range(len(df_residentes)):
                 if solver.Value(v_res[(r, d)]) == 1: rn = df_residentes.iloc[r]["Nombre"]
             res.append({"Fecha": rango_fechas[d].strftime('%Y-%m-%d'), "Adjunto": an, "Residente": rn})
@@ -223,7 +242,7 @@ def resolver():
     return None
 
 # --- 8. RENDER ---
-def render_mes_html(df, m, modo_adjuntos):
+def render_mes_html(df, m):
     cal = calendar.Calendar(firstweekday=0)
     html = f'<h3 class="mes-titulo">{mes_nombres[m-1]} {anio_sel}</h3><table class="calendar-table"><thead><tr>'
     for d in ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"]: html += f'<th>{d}</th>'
@@ -237,25 +256,20 @@ def render_mes_html(df, m, modo_adjuntos):
                 rows = df[df["Fecha"] == f_str]
                 if rows.empty: continue
                 row = rows.iloc[0]
+                
+                # Candadito visual si está bloqueado en la base de datos
+                candado = " 🔒" if f_str in st.session_state.guardias_fijas else ""
+                
                 html += f'<td><div class="day-number">{day}</div>'
+                if row["Adjunto"] != "VACÍO":
+                    color = ADJ_COLOR_MAP.get(row["Adjunto"], "#444")
+                    html += f'<div class="adjunto-label" style="background-color: {color}; color: {get_contrast_color(color)};">{row["Adjunto"]}{candado}</div>'
+                else: html += f'<div class="vacio-label">Adj: VACÍO{candado}</div>'
                 
-                if modo_adjuntos:
-                    # MODO DOBLE (Adjunto + Residente)
-                    if row["Adjunto"] != "VACÍO":
-                        color = ADJ_COLOR_MAP.get(row["Adjunto"], "#444")
-                        html += f'<div class="adjunto-label" style="background-color: {color}; color: {get_contrast_color(color)};">{row["Adjunto"]}</div>'
-                    else: html += '<div class="vacio-label">Adj: VACÍO</div>'
-                    if row["Residente"] != "VACÍO":
-                        color = RES_COLOR_MAP.get(row["Residente"], "#fff")
-                        html += f'<div class="residente-label" style="background-color: {color}; color: {get_contrast_color(color)};">{row["Residente"]} ({USER_R_MAP.get(row["Residente"], "")})</div>'
-                    else: html += '<div class="vacio-label">Res: VACÍO</div>'
-                else:
-                    # MODO SOLO RESIDENTE (Centrado y más grande)
-                    if row["Residente"] != "VACÍO":
-                        color = RES_COLOR_MAP.get(row["Residente"], "#fff")
-                        html += f'<div class="residente-label" style="background-color: {color}; color: {get_contrast_color(color)}; margin-top: 25px; padding: 12px; font-size: 1.15em;">{row["Residente"]} ({USER_R_MAP.get(row["Residente"], "")})</div>'
-                    else: html += '<div class="vacio-label" style="margin-top: 35px; font-size: 1em;">VACÍO</div>'
-                
+                if row["Residente"] != "VACÍO":
+                    color = RES_COLOR_MAP.get(row["Residente"], "#fff")
+                    html += f'<div class="residente-label" style="background-color: {color}; color: {get_contrast_color(color)};">{row["Residente"]} ({USER_R_MAP.get(row["Residente"], "")}){candado}</div>'
+                else: html += f'<div class="vacio-label">Res: VACÍO{candado}</div>'
                 html += '</td>'
         html += '</tr>'
     return html + '</tbody></table>'
@@ -274,43 +288,38 @@ if st.button("🚀 Generar Planificación", type="primary"):
             for d in ds:
                 if d not in t.columns: t[d] = 0
             t = t[ds].reindex(ord_p, fill_value=0)
-            t["TOTAL PERIODO"] = t.sum(axis=1)
+            t["TOTAL PERIODO"] = t.sum(axis=1) # <- AQUÍ ESTÁ LA COLUMNA DE TOTAL QUE PEDISTE
             return t
         
+        t_adj = build_stats(df_f, "Adjunto", df_adjuntos, False)
         t_res = build_stats(df_f, "Residente", df_residentes, True)
-        
         html = f"<html><head><meta charset='utf-8'>{estilos_css}</head><body><h1>Planificación</h1>"
-        for m in range(mes_ini, mes_fin+1): html += render_mes_html(df_f, m, incluir_adjuntos)
-        
-        if incluir_adjuntos:
-            t_adj = build_stats(df_f, "Adjunto", df_adjuntos, False)
-            html += "<h2>📊 Adjuntos</h2>" + t_adj.to_html(classes="summary-table")
-        else:
-            t_adj = None
-            
-        html += "<h2>📊 Residentes</h2>" + t_res.to_html(classes="summary-table") + "</body></html>"
-        
-        st.session_state.plan_generado = {
-            "df": df_f, 
-            "html": html, 
-            "t_adj": t_adj, 
-            "t_res": t_res, 
-            "meses": range(mes_ini, mes_fin+1),
-            "incluir_adj": incluir_adjuntos
-        }
-    else: st.error("❌ Los topes o ausencias no permiten balancear el cuadrante.")
+        for m in range(mes_ini, mes_fin+1): html += render_mes_html(df_f, m)
+        html += "<h2>📊 Adjuntos</h2>" + t_adj.to_html(classes="summary-table") + "<h2>📊 Residentes</h2>" + t_res.to_html(classes="summary-table") + "</body></html>"
+        st.session_state.plan_generado = {"df": df_f, "html": html, "t_adj": t_adj, "t_res": t_res, "meses": range(mes_ini, mes_fin+1)}
+    else: st.error("❌ Los topes, las ausencias o las guardias fijas no permiten cuadrar las reglas.")
 
 if st.session_state.plan_generado:
     d = st.session_state.plan_generado
-    inc_adj = d.get("incluir_adj", True)
+    for m in d["meses"]: st.write(render_mes_html(d["df"], m), unsafe_allow_html=True)
     
-    for m in d["meses"]: st.write(render_mes_html(d["df"], m, inc_adj), unsafe_allow_html=True)
+    st.markdown("<br>", unsafe_allow_html=True)
+    if st.button("💾 Fijar y Bloquear este plan", type="primary", use_container_width=True):
+        with st.spinner("Bloqueando guardias en la Base de Datos..."):
+            batch = db.batch() if db else None
+            df_f = d["df"]
+            for _, row in df_f.iterrows():
+                f_str = row["Fecha"]
+                data = {"Adjunto": row["Adjunto"], "Residente": row["Residente"]}
+                if batch: batch.set(db.collection("guardias_fijas").document(f_str), data)
+                st.session_state.guardias_fijas[f_str] = data
+            if batch: batch.commit()
+            st.success("✅ Guardias fijadas. Si generas este periodo de nuevo, se mantendrán intactas.")
+            st.rerun()
+
     st.divider()
-    
-    if inc_adj and d["t_adj"] is not None:
-        st.subheader("👨‍⚕️ Adjuntos")
-        st.dataframe(d["t_adj"].style.format(precision=0), use_container_width=True)
-        
+    st.subheader("👨‍⚕️ Adjuntos")
+    st.dataframe(d["t_adj"].style.format(precision=0), use_container_width=True)
     st.subheader("🎓 Residentes")
     st.dataframe(d["t_res"].style.format(precision=0), use_container_width=True)
     st.download_button("🎨 Descargar HTML", d["html"], "Plan.html", "text/html", type="primary")
