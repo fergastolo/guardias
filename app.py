@@ -54,6 +54,13 @@ def cargar_coleccion_dict(col_name):
     except: pass
     return res
 
+# FILTRO ANTI-NaN PARA FIREBASE
+def limpiar_nulos(val):
+    if pd.isna(val) or val is None: return "VACÍO"
+    s = str(val).strip()
+    if s in ["", "nan", "NaN", "None"]: return "VACÍO"
+    return s
+
 dias_espanol = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
 
 # --- 3. INICIALIZACIÓN DE SESIÓN BLINDADA ---
@@ -173,7 +180,7 @@ with t2:
     g_res = generar_grilla(df_residentes["Nombre"].tolist(), "res") if not df_residentes.empty else pd.DataFrame()
 
 with t3:
-    st.info("💡 Asigna manualmente. Si dejas 'VACÍO', la IA lo calculará. No olvides pulsar el botón azul de Guardar debajo de las pestañas.")
+    st.info("💡 Asigna manualmente. Haz clic fuera de la celda antes de darle al botón de Guardar.")
     ops_adj = ["VACÍO"] + (df_adjuntos["Nombre"].tolist() if not df_adjuntos.empty else [])
     ops_res = ["VACÍO"] + (df_residentes["Nombre"].tolist() if not df_residentes.empty else [])
     
@@ -197,54 +204,58 @@ with t3:
         }, key="editor_manual"
     )
 
+# BOTÓN ÚNICO Y BLINDADO DE GUARDADO
 st.markdown("<br>", unsafe_allow_html=True)
-if st.button("☁️ Sincronizar y Guardar TODO (Plantillas, Ausencias y Manuales)", type="primary", use_container_width=True):
-    with st.spinner("Guardando en la nube de forma segura..."):
-        batch = db.batch() if db else None
-        
-        # 1. Guardar Plantillas
-        if incluir_adjuntos and not df_adjuntos.empty:
-            for _, row in df_adjuntos.iterrows(): 
-                if batch: batch.set(db.collection("plantilla_adjuntos").document(row["Nombre"]), row.to_dict())
-        if not df_residentes.empty:
-            for _, row in df_residentes.iterrows(): 
-                if batch: batch.set(db.collection("plantilla_residentes").document(row["Nombre"]), row.to_dict())
-        
-        # 2. Guardar Ausencias
-        listas_sync = []
-        if not df_residentes.empty: listas_sync.append((g_res, df_residentes["Nombre"].tolist()))
-        if incluir_adjuntos and not df_adjuntos.empty: listas_sync.append((g_adj, df_adjuntos["Nombre"].tolist()))
-        
-        for g, nombres in listas_sync:
-            for nom in nombres:
-                if not nom: continue
-                nuevas = {rango_fechas[i] for i, v in enumerate(g.loc[nom]) if v}
-                fuera = {d for d in st.session_state.ausencias_globales.get(nom, set()) if not (rango_fechas[0] <= d <= rango_fechas[-1])}
-                final = nuevas.union(fuera)
-                st.session_state.ausencias_globales[nom] = final
-                if batch: batch.set(db.collection("ausencias").document(nom), {"nombre": nom, "fechas": [d.strftime('%Y-%m-%d') for d in final]})
-        
-        # 3. Guardar Guardias Manuales (Blindando los Null/NaN)
-        for _, row in df_manual_edit.iterrows():
-            f_str = row["Fecha"]
-            # Blindaje: Si alguien borra la celda y queda NaN/None, forzamos "VACÍO"
-            a_nom = str(row["Adjunto"]) if pd.notna(row["Adjunto"]) and row["Adjunto"] is not None else "VACÍO"
-            r_nom = str(row["Residente"]) if pd.notna(row["Residente"]) and row["Residente"] is not None else "VACÍO"
+if st.button("☁️ SINCRONIZAR Y GUARDAR TODO (Ausencias, Plantillas y Manuales)", type="primary", use_container_width=True):
+    with st.spinner("Desinfectando datos y guardando en la nube..."):
+        try:
+            batch = db.batch() if db else None
             
-            if a_nom != "VACÍO" or r_nom != "VACÍO":
-                data = {"Adjunto": a_nom, "Residente": r_nom}
-                st.session_state.guardias_fijas[f_str] = data
-                if batch: batch.set(db.collection("guardias_fijas").document(f_str), data)
-            else:
-                if f_str in st.session_state.guardias_fijas:
-                    del st.session_state.guardias_fijas[f_str]
-                    if batch: batch.delete(db.collection("guardias_fijas").document(f_str))
-        
-        if batch: batch.commit()
-        st.success("✅ ¡Éxito! Plantillas, Ausencias y Guardias Manuales se han guardado permanentemente.")
-        st.rerun()
+            # 1. Guardar Plantillas (Limpiando nulos)
+            if incluir_adjuntos and not df_adjuntos.empty:
+                for _, row in df_adjuntos.iterrows(): 
+                    if batch: batch.set(db.collection("plantilla_adjuntos").document(row["Nombre"]), {k: ("" if pd.isna(v) else v) for k, v in row.items()})
+            if not df_residentes.empty:
+                for _, row in df_residentes.iterrows(): 
+                    if batch: batch.set(db.collection("plantilla_residentes").document(row["Nombre"]), {k: ("" if pd.isna(v) else v) for k, v in row.items()})
+            
+            # 2. Guardar Ausencias
+            listas_sync = []
+            if not df_residentes.empty: listas_sync.append((g_res, df_residentes["Nombre"].tolist()))
+            if incluir_adjuntos and not df_adjuntos.empty: listas_sync.append((g_adj, df_adjuntos["Nombre"].tolist()))
+            
+            for g, nombres in listas_sync:
+                for nom in nombres:
+                    if not nom: continue
+                    nuevas = {rango_fechas[i] for i, v in enumerate(g.loc[nom]) if v}
+                    fuera = {d for d in st.session_state.ausencias_globales.get(nom, set()) if not (rango_fechas[0] <= d <= rango_fechas[-1])}
+                    final = nuevas.union(fuera)
+                    st.session_state.ausencias_globales[nom] = final
+                    if batch: batch.set(db.collection("ausencias").document(nom), {"nombre": nom, "fechas": [d.strftime('%Y-%m-%d') for d in final]})
+            
+            # 3. Guardar Manuales (El blindaje anti-NaN)
+            for _, row in df_manual_edit.iterrows():
+                f_str = row["Fecha"]
+                a_nom = limpiar_nulos(row["Adjunto"])
+                r_nom = limpiar_nulos(row["Residente"])
+                
+                if a_nom != "VACÍO" or r_nom != "VACÍO":
+                    data = {"Adjunto": a_nom, "Residente": r_nom}
+                    st.session_state.guardias_fijas[f_str] = data
+                    if batch: batch.set(db.collection("guardias_fijas").document(f_str), data)
+                else:
+                    if f_str in st.session_state.guardias_fijas:
+                        del st.session_state.guardias_fijas[f_str]
+                        if batch: batch.delete(db.collection("guardias_fijas").document(f_str))
+            
+            if batch: batch.commit()
+            st.success("✅ ¡Éxito absoluto! Guardias manuales fijadas en la base de datos.")
+            st.rerun()
+            
+        except Exception as e:
+            st.error(f"❌ Error crítico al enviar a Firebase: {e}")
 
-# --- FUNCIÓN DETECTIVE DE CONFLICTOS Y SUGERENCIAS BLINDADAS ---
+# --- FUNCIÓN DETECTIVE DE CONFLICTOS ---
 def diagnosticar_conflictos():
     errores = []
     n_dias = len(rango_fechas)
@@ -253,7 +264,6 @@ def diagnosticar_conflictos():
         disponibles = []
         d_date = rango_fechas[dia_idx]
         rol_k = "Adjunto" if is_adj else "Residente"
-        
         for _, r in df_staff.iterrows():
             nom = r["Nombre"]
             if nom == exclude_nom: continue
@@ -282,7 +292,6 @@ def diagnosticar_conflictos():
             guardias_este_mes = sum(1 for d in range(n_dias) if rango_fechas[d].month == mes_actual and st.session_state.guardias_fijas.get(rango_fechas[d].strftime('%Y-%m-%d'), {}).get(rol_k) == nom)
             if guardias_este_mes >= r["Tope"]: disponibles.append(f"{nom} (⚠️ Excede tope)") 
             else: disponibles.append(nom)
-
         return disponibles[:4]
 
     for df_staff, is_adj, rol in [(df_adjuntos, True, "Adjunto"), (df_residentes, False, "Residente")]:
@@ -292,7 +301,6 @@ def diagnosticar_conflictos():
         for _, row in df_staff.iterrows():
             nom = row["Nombre"]
             dias_idx = []
-
             for d in range(n_dias):
                 f_str = rango_fechas[d].strftime('%Y-%m-%d')
                 fijo = st.session_state.guardias_fijas.get(f_str, {})
@@ -304,29 +312,24 @@ def diagnosticar_conflictos():
 
             for i in dias_idx:
                 if i + 1 in dias_idx:
-                    sug1 = obtener_disponibles(i, df_staff, is_adj, nom)
-                    sug2 = obtener_disponibles(i+1, df_staff, is_adj, nom)
-                    errores.append(f"**{nom}** tiene fijado {rango_fechas[i].strftime('%d/%m')} y {rango_fechas[i+1].strftime('%d/%m')} (Consecutivos).\n* 💡 **Opciones viables:**\n  * 1️⃣ Cambiar el primer día a: {', '.join(sug1) if sug1 else 'Nadie'}.\n  * 2️⃣ Cambiar el segundo día a: {', '.join(sug2) if sug2 else 'Nadie'}.")
+                    sug1 = obtener_disponibles(i, df_staff, is_adj, nom); sug2 = obtener_disponibles(i+1, df_staff, is_adj, nom)
+                    errores.append(f"**{nom}** tiene fijado {rango_fechas[i].strftime('%d/%m')} y {rango_fechas[i+1].strftime('%d/%m')} (Consecutivos).\n* 💡 **Opciones:**\n  * Cambiar 1º a: {', '.join(sug1) if sug1 else 'Nadie'}.\n  * Cambiar 2º a: {', '.join(sug2) if sug2 else 'Nadie'}.")
                 
                 wd = rango_fechas[i].weekday()
                 if wd == 5 and i + 5 in dias_idx:
-                    sug_sab = obtener_disponibles(i, df_staff, is_adj, nom)
-                    sug_jue = obtener_disponibles(i+5, df_staff, is_adj, nom)
-                    errores.append(f"**{nom}** está fijado el Sáb {rango_fechas[i].strftime('%d/%m')} y el Jue {rango_fechas[i+5].strftime('%d/%m')} (Descanso roto).\n* 💡 **Opciones viables:**\n  * 1️⃣ Cambia el Sábado a: **{', '.join(sug_sab) if sug_sab else 'Nadie disponible'}**.\n  * 2️⃣ Cambia el Jueves a: **{', '.join(sug_jue) if sug_jue else 'Nadie disponible'}**.")
+                    sug_sab = obtener_disponibles(i, df_staff, is_adj, nom); sug_jue = obtener_disponibles(i+5, df_staff, is_adj, nom)
+                    errores.append(f"**{nom}** fijado el Sáb {rango_fechas[i].strftime('%d/%m')} y Jue {rango_fechas[i+5].strftime('%d/%m')}.\n* 💡 **Opciones:**\n  * Cambia Sábado a: **{', '.join(sug_sab) if sug_sab else 'Nadie'}**.\n  * Cambia Jueves a: **{', '.join(sug_jue) if sug_jue else 'Nadie'}**.")
                 
                 if wd == 3 and i + 2 in dias_idx:
-                    sug_jue = obtener_disponibles(i, df_staff, is_adj, nom)
-                    sug_sab = obtener_disponibles(i+2, df_staff, is_adj, nom)
-                    errores.append(f"**{nom}** está fijado el Jue {rango_fechas[i].strftime('%d/%m')} y el Sáb {rango_fechas[i+2].strftime('%d/%m')} (Descanso roto).\n* 💡 **Opciones viables:**\n  * 1️⃣ Cambia el Jueves a: **{', '.join(sug_jue) if sug_jue else 'Nadie disponible'}**.\n  * 2️⃣ Cambia el Sábado a: **{', '.join(sug_sab) if sug_sab else 'Nadie disponible'}**.")
+                    sug_jue = obtener_disponibles(i, df_staff, is_adj, nom); sug_sab = obtener_disponibles(i+2, df_staff, is_adj, nom)
+                    errores.append(f"**{nom}** fijado el Jue {rango_fechas[i].strftime('%d/%m')} y Sáb {rango_fechas[i+2].strftime('%d/%m')}.\n* 💡 **Opciones:**\n  * Cambia Jueves a: **{', '.join(sug_jue) if sug_jue else 'Nadie'}**.\n  * Cambia Sábado a: **{', '.join(sug_sab) if sug_sab else 'Nadie'}**.")
 
                 if not is_adj and wd == 4 and i + 2 < n_dias:
                     f2_str = rango_fechas[i+2].strftime('%Y-%m-%d')
                     fijo_dom = st.session_state.guardias_fijas.get(f2_str, {}).get(rol)
                     if fijo_dom and fijo_dom != "VACÍO" and fijo_dom != nom:
-                        sug_vie = obtener_disponibles(i, df_staff, is_adj, nom)
-                        sug_dom = obtener_disponibles(i+2, df_staff, is_adj, fijo_dom)
-                        errores.append(f"**{nom}** hace el Viernes {rango_fechas[i].strftime('%d/%m')}, pero el Domingo está fijado para **{fijo_dom}** (Fin de semana dividido).\n* 💡 **Opciones viables:**\n  * 1️⃣ Cambia el Viernes a: **{', '.join(sug_vie) if sug_vie else 'Nadie disponible'}**.\n  * 2️⃣ Cambia el Domingo a: **{', '.join(sug_dom) if sug_dom else 'Nadie disponible'}**.")
-
+                        sug_vie = obtener_disponibles(i, df_staff, is_adj, nom); sug_dom = obtener_disponibles(i+2, df_staff, is_adj, fijo_dom)
+                        errores.append(f"**{nom}** hace Viernes {rango_fechas[i].strftime('%d/%m')}, pero Domingo es de **{fijo_dom}**.\n* 💡 **Opciones:**\n  * Cambia Viernes a: **{', '.join(sug_vie) if sug_vie else 'Nadie'}**.\n  * Cambia Domingo a: **{', '.join(sug_dom) if sug_dom else 'Nadie'}**.")
     return list(set(errores))
 
 # --- 7. MOTOR ---
@@ -335,13 +338,10 @@ def resolver():
     num_dias = len(rango_fechas)
     def aplicar_reglas(staff, prefix, es_adj):
         n = len(staff); v = {(r, d): model.NewBoolVar(f'{prefix}_r{r}d{d}') for r in range(n) for d in range(num_dias)}
-        
         if n == 0: return v, []
-
         for d in range(num_dias):
             f_str = rango_fechas[d].strftime('%Y-%m-%d')
             fijo = st.session_state.guardias_fijas.get(f_str)
-            
             model.Add(sum(v[(r, d)] for r in range(n)) <= 1)
             
             if fijo:
@@ -369,7 +369,6 @@ def resolver():
                     suma_wd = sum(v[(r, d)] for d in idx_wd)
                     h2 = model.NewBoolVar(f'{prefix}_r{r}m{m}wd{wd}_h2')
                     model.Add(suma_wd <= 1 + h2); objs.append(h2 * -80000)
-        
         for d in range(num_dias):
             for r in range(n): objs.append(v[(r, d)] * (100000 + random.randint(1, 999)))
         return v, objs
