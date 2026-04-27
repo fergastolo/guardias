@@ -236,48 +236,73 @@ with col_sync:
                     db.collection("ausencias").document(nom).set({"nombre": nom, "fechas": [d.strftime('%Y-%m-%d') for d in final]})
             st.success("✅ Sincronizado."); st.rerun()
 
-# --- FUNCIÓN DETECTIVE DE CONFLICTOS ---
+# --- FUNCIÓN DETECTIVE DE CONFLICTOS Y SUGERENCIAS ---
 def diagnosticar_conflictos():
     errores = []
     n_dias = len(rango_fechas)
 
-    # Solo verificamos Fijos vs Ausencias y Reglas Matemáticas Inquebrantables
+    # Sub-función para buscar reemplazos viables en un día conflictivo
+    def obtener_disponibles(dia_idx, df_staff, is_adj, exclude_nom):
+        disponibles = []
+        d_date = rango_fechas[dia_idx]
+        rol_k = "Adjunto" if is_adj else "Residente"
+        for _, r in df_staff.iterrows():
+            nom = r["Nombre"]
+            if nom == exclude_nom: continue
+            
+            # Regla 1: No está de vacaciones
+            if d_date in st.session_state.ausencias_globales.get(nom, set()): continue
+            
+            # Regla 2: No trabaja el día antes ni después
+            f_antes = st.session_state.guardias_fijas.get(rango_fechas[dia_idx-1].strftime('%Y-%m-%d'), {}) if dia_idx > 0 else {}
+            f_despues = st.session_state.guardias_fijas.get(rango_fechas[dia_idx+1].strftime('%Y-%m-%d'), {}) if dia_idx < n_dias-1 else {}
+            if f_antes.get(rol_k) == nom or f_despues.get(rol_k) == nom: continue
+            
+            # Regla 3: No rompe Jue/Sáb
+            wd = d_date.weekday()
+            if wd == 3: # Si sugerimos un Jueves, mirar si trabaja el Sábado
+                if dia_idx+2 < n_dias and st.session_state.guardias_fijas.get(rango_fechas[dia_idx+2].strftime('%Y-%m-%d'), {}).get(rol_k) == nom: continue
+                if dia_idx-5 >= 0 and st.session_state.guardias_fijas.get(rango_fechas[dia_idx-5].strftime('%Y-%m-%d'), {}).get(rol_k) == nom: continue
+            if wd == 5: # Si sugerimos un Sábado, mirar si trabaja el Jueves
+                if dia_idx-2 >= 0 and st.session_state.guardias_fijas.get(rango_fechas[dia_idx-2].strftime('%Y-%m-%d'), {}).get(rol_k) == nom: continue
+                if dia_idx+5 < n_dias and st.session_state.guardias_fijas.get(rango_fechas[dia_idx+5].strftime('%Y-%m-%d'), {}).get(rol_k) == nom: continue
+            
+            disponibles.append(nom)
+        return disponibles[:3] # Devolvemos los 3 primeros
+
     for df_staff, is_adj, rol in [(df_adjuntos, True, "Adjunto"), (df_residentes, False, "Residente")]:
         if is_adj and not incluir_adjuntos: continue
         if df_staff.empty: continue
 
         for _, row in df_staff.iterrows():
             nom = row["Nombre"]
-            tope = row["Tope"]
-            fijos_mes = {}
             dias_idx = []
 
             for d in range(n_dias):
                 f_str = rango_fechas[d].strftime('%Y-%m-%d')
                 fijo = st.session_state.guardias_fijas.get(f_str, {})
                 if fijo.get(rol) == nom:
-                    m = rango_fechas[d].month
-                    fijos_mes[m] = fijos_mes.get(m, 0) + 1
                     dias_idx.append(d)
                     if rango_fechas[d] in st.session_state.ausencias_globales.get(nom, set()):
-                        errores.append(f"**{nom}** tiene asignada la guardia fija del {f_str} pero está marcado como **AUSENTE**.")
-
-            for m, count in fijos_mes.items():
-                if count > tope: errores.append(f"**{nom}** tiene {count} guardias fijadas en el mes {m}, pero su tope en la barra lateral es de solo {tope}.")
+                        sug = obtener_disponibles(d, df_staff, is_adj, nom)
+                        errores.append(f"**{nom}** tiene la guardia fija del {f_str} pero está **AUSENTE**.\n* 💡 **Cambia ese día a:** {', '.join(sug) if sug else 'Nadie disponible'}.")
 
             for i in dias_idx:
                 if i + 1 in dias_idx:
-                    errores.append(f"**{nom}** tiene guardias consecutivas fijadas: {rango_fechas[i].strftime('%d/%m')} y {rango_fechas[i+1].strftime('%d/%m')}.")
+                    sug1 = obtener_disponibles(i, df_staff, is_adj, nom)
+                    sug2 = obtener_disponibles(i+1, df_staff, is_adj, nom)
+                    errores.append(f"**{nom}** tiene fijado {rango_fechas[i].strftime('%d/%m')} y {rango_fechas[i+1].strftime('%d/%m')} (Consecutivos).\n* 💡 **Opciones:**\n  * 1️⃣ Cambiar el primer día a: {', '.join(sug1) if sug1 else 'Nadie'}.\n  * 2️⃣ Cambiar el segundo día a: {', '.join(sug2) if sug2 else 'Nadie'}.")
+                
                 wd = rango_fechas[i].weekday()
-                if wd == 5 and i + 5 in dias_idx:
-                    errores.append(f"**{nom}** está fijado el Sábado {rango_fechas[i].strftime('%d/%m')} y el Jueves {rango_fechas[i+5].strftime('%d/%m')} (Rompiste la regla de descanso Sáb->Jue).")
-                if wd == 3 and i + 2 in dias_idx:
-                    errores.append(f"**{nom}** está fijado el Jueves {rango_fechas[i].strftime('%d/%m')} y el Sábado {rango_fechas[i+2].strftime('%d/%m')} (Rompiste la regla de descanso Jue->Sáb).")
-                if not is_adj and wd == 4 and i + 2 < n_dias:
-                    f2_str = rango_fechas[i+2].strftime('%Y-%m-%d')
-                    fijo_dom = st.session_state.guardias_fijas.get(f2_str, {}).get("Residente")
-                    if fijo_dom and fijo_dom != "VACÍO" and fijo_dom != nom:
-                        errores.append(f"**{nom}** hace el Viernes {rango_fechas[i].strftime('%d/%m')}, pero el Domingo está fijado manualmente para **{fijo_dom}**.")
+                if wd == 5 and i + 5 in dias_idx: # Sabado -> Jueves
+                    sug_sab = obtener_disponibles(i, df_staff, is_adj, nom)
+                    sug_jue = obtener_disponibles(i+5, df_staff, is_adj, nom)
+                    errores.append(f"**{nom}** está fijado el Sáb {rango_fechas[i].strftime('%d/%m')} y el Jue {rango_fechas[i+5].strftime('%d/%m')} (Regla de descanso rota).\n* 💡 **Opciones para arreglarlo:**\n  * 1️⃣ Cambia el Sábado a: **{', '.join(sug_sab) if sug_sab else 'Nadie disponible'}**.\n  * 2️⃣ Cambia el Jueves a: **{', '.join(sug_jue) if sug_jue else 'Nadie disponible'}**.\n  * 3️⃣ Deja uno en 'VACÍO' en el editor manual.")
+                
+                if wd == 3 and i + 2 in dias_idx: # Jueves -> Sabado
+                    sug_jue = obtener_disponibles(i, df_staff, is_adj, nom)
+                    sug_sab = obtener_disponibles(i+2, df_staff, is_adj, nom)
+                    errores.append(f"**{nom}** está fijado el Jue {rango_fechas[i].strftime('%d/%m')} y el Sáb {rango_fechas[i+2].strftime('%d/%m')} (Regla de descanso rota).\n* 💡 **Opciones para arreglarlo:**\n  * 1️⃣ Cambia el Jueves a: **{', '.join(sug_jue) if sug_jue else 'Nadie disponible'}**.\n  * 2️⃣ Cambia el Sábado a: **{', '.join(sug_sab) if sug_sab else 'Nadie disponible'}**.\n  * 3️⃣ Deja uno en 'VACÍO' en el editor manual.")
 
     return list(set(errores))
 
@@ -294,7 +319,7 @@ def resolver():
             f_str = rango_fechas[d].strftime('%Y-%m-%d')
             fijo = st.session_state.guardias_fijas.get(f_str)
             
-            # AHORA AMBOS PUEDEN QUEDAR VACÍOS SI SE ACABAN LOS TOPES (<= 1)
+            # Se permite dejar días en VACÍO
             model.Add(sum(v[(r, d)] for r in range(n)) <= 1)
             
             if fijo:
@@ -323,7 +348,7 @@ def resolver():
                     h2 = model.NewBoolVar(f'{prefix}_r{r}m{m}wd{wd}_h2')
                     model.Add(suma_wd <= 1 + h2); objs.append(h2 * -80000)
         
-        # PREMIO ALTO POR ASIGNAR: Esto hace que intente llenar todos los días hasta agotar topes
+        # Incentivamos a asignar lo máximo posible sin forzar (para cubrir topes)
         for d in range(num_dias):
             for r in range(n): objs.append(v[(r, d)] * (100000 + random.randint(1, 999)))
         return v, objs
@@ -404,9 +429,9 @@ if st.button("🚀 Generar Planificación", type="primary"):
     else: 
         conflictos = diagnosticar_conflictos()
         if conflictos:
-            st.error("❌ El sistema no pudo cuadrar el calendario porque encontró las siguientes contradicciones en tus datos:")
+            st.error("❌ El sistema detectó las siguientes contradicciones entre las reglas y tus datos:")
             for error in conflictos:
-                st.warning(f"⚠️ {error}")
+                st.warning(error)
         else:
             st.error("❌ Conflicto matemático complejo. Prueba a flexibilizar los topes o quitar ausencias.")
 
