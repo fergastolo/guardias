@@ -54,7 +54,6 @@ def cargar_coleccion_dict(col_name):
     except: pass
     return res
 
-# Traducción de días para el editor manual
 dias_espanol = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
 
 # --- 3. INICIALIZACIÓN DE SESIÓN BLINDADA ---
@@ -116,11 +115,9 @@ if incluir_adjuntos:
         df_adjuntos = df_adjuntos.dropna(subset=["Nombre"]).drop_duplicates(subset=["Nombre"])
         ADJ_COLOR_MAP = {row["Nombre"]: row.get("Color", "#444444") for _, row in df_adjuntos.iterrows()}
     else:
-        df_adjuntos = pd.DataFrame(columns=["Nombre", "Tope", "Color"])
-        ADJ_COLOR_MAP = {}
+        df_adjuntos = pd.DataFrame(columns=["Nombre", "Tope", "Color"]); ADJ_COLOR_MAP = {}
 else:
-    df_adjuntos = pd.DataFrame()
-    ADJ_COLOR_MAP = {}
+    df_adjuntos = pd.DataFrame(); ADJ_COLOR_MAP = {}
 
 st.sidebar.header("🎓 2. Plantilla Residentes")
 df_residentes = st.sidebar.data_editor(st.session_state.residentes_init, num_rows="dynamic", key="edit_res", column_config=conf_c)
@@ -129,9 +126,7 @@ if "Nombre" in df_residentes.columns:
     RES_COLOR_MAP = {row["Nombre"]: row.get("Color", "#FFFFFF") for _, row in df_residentes.iterrows()}
     USER_R_MAP = {row["Nombre"]: row.get("R", "") for _, row in df_residentes.iterrows()}
 else:
-    df_residentes = pd.DataFrame(columns=["Nombre", "Tope", "R", "Color"])
-    RES_COLOR_MAP = {}
-    USER_R_MAP = {}
+    df_residentes = pd.DataFrame(columns=["Nombre", "Tope", "R", "Color"]); RES_COLOR_MAP = {}; USER_R_MAP = {}
 
 st.sidebar.header("📅 3. Periodo")
 mes_nombres = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
@@ -151,8 +146,7 @@ if st.sidebar.button("🗑️ Borrar TODAS las Guardias Fijas", type="primary"):
             for doc in docs: batch.delete(doc.reference)
             batch.commit()
         st.session_state.guardias_fijas = {}
-    st.sidebar.success("✅ Base de datos limpia.")
-    st.rerun()
+    st.sidebar.success("✅ Base de datos limpia."); st.rerun()
 
 if st.sidebar.button("🔓 Desbloquear Solo Periodo Actual"):
     for d in rango_fechas:
@@ -172,15 +166,14 @@ def generar_grilla(nombres, key_p):
 t1, t2, t3 = st.tabs(["👨‍⚕️ Ausencias Adjuntos", "🎓 Ausencias Residentes", "📝 Editor Manual de Guardias Fijas"])
 
 with t1:
-    if incluir_adjuntos:
-        g_adj = generar_grilla(df_adjuntos["Nombre"].tolist(), "adj") if not df_adjuntos.empty else pd.DataFrame()
+    if incluir_adjuntos: g_adj = generar_grilla(df_adjuntos["Nombre"].tolist(), "adj") if not df_adjuntos.empty else pd.DataFrame()
     else: g_adj = pd.DataFrame()
 
 with t2:
     g_res = generar_grilla(df_residentes["Nombre"].tolist(), "res") if not df_residentes.empty else pd.DataFrame()
 
 with t3:
-    st.info("💡 Asigna manualmente a un residente o adjunto en un día específico. Si dejas 'VACÍO', la IA lo calculará. Luego pulsa 'Guardar Asignaciones Manuales'.")
+    st.info("💡 Asigna manualmente. Si dejas 'VACÍO', la IA lo calculará.")
     ops_adj = ["VACÍO"] + (df_adjuntos["Nombre"].tolist() if not df_adjuntos.empty else [])
     ops_res = ["VACÍO"] + (df_residentes["Nombre"].tolist() if not df_residentes.empty else [])
     
@@ -189,33 +182,26 @@ with t3:
         f_str = d.strftime('%Y-%m-%d')
         fijo = st.session_state.guardias_fijas.get(f_str, {})
         filas_manual.append({
-            "Fecha": f_str,
-            "Día": dias_espanol[d.weekday()],
+            "Fecha": f_str, "Día": dias_espanol[d.weekday()],
             "Adjunto": fijo.get("Adjunto", "VACÍO") if pd.notna(fijo.get("Adjunto")) else "VACÍO",
             "Residente": fijo.get("Residente", "VACÍO") if pd.notna(fijo.get("Residente")) else "VACÍO"
         })
     
     df_manual_edit = st.data_editor(
-        pd.DataFrame(filas_manual),
-        use_container_width=True,
-        hide_index=True,
+        pd.DataFrame(filas_manual), use_container_width=True, hide_index=True,
         column_config={
             "Fecha": st.column_config.TextColumn("Fecha", disabled=True),
             "Día": st.column_config.TextColumn("Día de la semana", disabled=True),
             "Adjunto": st.column_config.SelectboxColumn("Adjunto Fijo", options=ops_adj),
             "Residente": st.column_config.SelectboxColumn("Residente Fijo", options=ops_res)
-        },
-        key="editor_manual"
+        }, key="editor_manual"
     )
     
     if st.button("💾 Guardar Asignaciones Manuales", type="primary"):
         with st.spinner("Guardando en la base de datos..."):
             batch = db.batch() if db else None
             for _, row in df_manual_edit.iterrows():
-                f_str = row["Fecha"]
-                a_nom = row["Adjunto"]
-                r_nom = row["Residente"]
-                
+                f_str, a_nom, r_nom = row["Fecha"], row["Adjunto"], row["Residente"]
                 if a_nom != "VACÍO" or r_nom != "VACÍO":
                     data = {"Adjunto": a_nom, "Residente": r_nom}
                     st.session_state.guardias_fijas[f_str] = data
@@ -225,8 +211,7 @@ with t3:
                         del st.session_state.guardias_fijas[f_str]
                         if batch: batch.delete(db.collection("guardias_fijas").document(f_str))
             if batch: batch.commit()
-        st.success("✅ Guardias manuales fijadas. Ya puedes ir abajo y darle a 'Generar Planificación'.")
-        st.rerun()
+        st.success("✅ Guardias manuales fijadas."); st.rerun()
 
 col_sync, col_blank = st.columns([1, 3])
 with col_sync:
@@ -246,10 +231,75 @@ with col_sync:
                     if not nom: continue
                     nuevas = {rango_fechas[i] for i, v in enumerate(g.loc[nom]) if v}
                     fuera = {d for d in st.session_state.ausencias_globales.get(nom, set()) if not (rango_fechas[0] <= d <= rango_fechas[-1])}
-                    final = nuevas.union(fuera)
-                    st.session_state.ausencias_globales[nom] = final
-                    db.collection("ausencias").document(nom).set({"nombre": nom, "fechas": [d.strftime('%Y-%m-%d') for d in final]})
+                    st.session_state.ausencias_globales[nom] = nuevas.union(fuera)
+                    db.collection("ausencias").document(nom).set({"nombre": nom, "fechas": [d.strftime('%Y-%m-%d') for d in st.session_state.ausencias_globales[nom]]})
             st.success("✅ Sincronizado."); st.rerun()
+
+# --- FUNCIÓN DETECTIVE DE CONFLICTOS ---
+def diagnosticar_conflictos():
+    errores = []
+    n_dias = len(rango_fechas)
+
+    # 1. Topes insuficientes
+    for m in list(set(rango_fechas.month)):
+        dias_mes = sum(1 for d in rango_fechas if d.month == m)
+        if incluir_adjuntos and not df_adjuntos.empty:
+            tope_adj = df_adjuntos["Tope"].sum()
+            if tope_adj < dias_mes: errores.append(f"**Adjuntos en mes {m}:** Hay {dias_mes} días, pero la suma de topes es solo {tope_adj}.")
+        if not df_residentes.empty:
+            tope_res = df_residentes["Tope"].sum()
+            if tope_res < dias_mes: errores.append(f"**Residentes en mes {m}:** Hay {dias_mes} días, pero la suma de topes es solo {tope_res}.")
+
+    # 2. Fijos vs Ausencias y Reglas
+    for df_staff, is_adj, rol in [(df_adjuntos, True, "Adjunto"), (df_residentes, False, "Residente")]:
+        if is_adj and not incluir_adjuntos: continue
+        if df_staff.empty: continue
+
+        for _, row in df_staff.iterrows():
+            nom = row["Nombre"]
+            tope = row["Tope"]
+            fijos_mes = {}
+            dias_idx = []
+
+            for d in range(n_dias):
+                f_str = rango_fechas[d].strftime('%Y-%m-%d')
+                fijo = st.session_state.guardias_fijas.get(f_str, {})
+                if fijo.get(rol) == nom:
+                    m = rango_fechas[d].month
+                    fijos_mes[m] = fijos_mes.get(m, 0) + 1
+                    dias_idx.append(d)
+                    if rango_fechas[d] in st.session_state.ausencias_globales.get(nom, set()):
+                        errores.append(f"**{nom}** tiene asignada la guardia fija del {f_str} pero está marcado como **AUSENTE**.")
+
+            for m, count in fijos_mes.items():
+                if count > tope: errores.append(f"**{nom}** tiene {count} guardias fijadas en el mes {m}, pero su tope es {tope}.")
+
+            for i in dias_idx:
+                if i + 1 in dias_idx:
+                    errores.append(f"**{nom}** tiene guardias consecutivas fijadas: {rango_fechas[i].strftime('%d/%m')} y {rango_fechas[i+1].strftime('%d/%m')}.")
+                wd = rango_fechas[i].weekday()
+                if wd == 5 and i + 5 in dias_idx:
+                    errores.append(f"**{nom}** está fijado el Sábado {rango_fechas[i].strftime('%d/%m')} y el Jueves {rango_fechas[i+5].strftime('%d/%m')} (Rompiste la regla Sáb->Jue).")
+                if wd == 3 and i + 2 in dias_idx:
+                    errores.append(f"**{nom}** está fijado el Jueves {rango_fechas[i].strftime('%d/%m')} y el Sábado {rango_fechas[i+2].strftime('%d/%m')} (Rompiste la regla Jue->Sáb).")
+                if not is_adj and wd == 4 and i + 2 < n_dias:
+                    f2_str = rango_fechas[i+2].strftime('%Y-%m-%d')
+                    fijo_dom = st.session_state.guardias_fijas.get(f2_str, {}).get("Residente")
+                    if fijo_dom and fijo_dom != "VACÍO" and fijo_dom != nom:
+                        errores.append(f"**{nom}** hace el Viernes {rango_fechas[i].strftime('%d/%m')}, pero el Domingo está fijado manualmente para **{fijo_dom}** (Rompiste la regla de fin de semana).")
+
+    # 3. Días sin personal
+    for d in range(n_dias):
+        fecha = rango_fechas[d]
+        f_str = fecha.strftime('%d/%m')
+        if incluir_adjuntos and not df_adjuntos.empty:
+            if sum(1 for _, r in df_adjuntos.iterrows() if fecha not in st.session_state.ausencias_globales.get(r["Nombre"], set())) == 0:
+                errores.append(f"El {f_str} **TODOS** los adjuntos están ausentes. Imposible cubrir.")
+        if not df_residentes.empty:
+            if sum(1 for _, r in df_residentes.iterrows() if fecha not in st.session_state.ausencias_globales.get(r["Nombre"], set())) == 0:
+                errores.append(f"El {f_str} **TODOS** los residentes están ausentes. Imposible cubrir.")
+
+    return list(set(errores))
 
 # --- 7. MOTOR ---
 def resolver():
@@ -368,7 +418,15 @@ if st.button("🚀 Generar Planificación", type="primary"):
         html += "</body></html>"
         st.session_state.plan_generado["html"] = html
         
-    else: st.error("❌ Conflicto de reglas o topes. Revisa las guardias fijadas manualmente o sube los topes.")
+    else: 
+        # LLAMAMOS AL DETECTIVE DE CONFLICTOS
+        conflictos = diagnosticar_conflictos()
+        if conflictos:
+            st.error("❌ El sistema no pudo cuadrar el calendario porque encontró las siguientes contradicciones en tus datos:")
+            for error in conflictos:
+                st.warning(f"⚠️ {error}")
+        else:
+            st.error("❌ Conflicto matemático complejo (ej. reglas de descanso que se cruzan sin salida posible). Prueba a flexibilizar los topes o quitar ausencias.")
 
 if st.session_state.plan_generado:
     d = st.session_state.plan_generado
